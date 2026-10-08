@@ -35,8 +35,12 @@ from data_processor import (
     TABLE_TOOLS_FOOT,
     TABLE_TOOLS_METHODS,
     dataframe_to_csv_bytes,
+    COMPARISON_DEFAULT_PERIOD,
+    COMPARISON_FOOT,
+    COMPARISON_METHODS,
     HEATMAP_FOOT,
     HEATMAP_METHODS,
+    build_repository_comparison,
     filter_table,
     tables_to_excel_bytes,
     ISSUE_RESOLUTION_FOOT,
@@ -581,7 +585,8 @@ footer { display: none !important; }
 }
 
 
-div.st-key-control_panel {
+div.st-key-control_panel,
+div.st-key-compare_panel {
     background:
         linear-gradient(180deg, rgba(255,255,255,0.022), rgba(255,255,255,0) 40%),
         var(--gs-surface);
@@ -604,7 +609,8 @@ div.st-key-control_panel {
 .gs-field-label span { font-size: 0.86rem; color: var(--gs-text-3); }
 
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"] {
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"],
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"] {
     background: var(--gs-surface-2) !important;
     border: 1px solid var(--gs-border-strong) !important;
     border-radius: 13px !important;
@@ -612,22 +618,26 @@ div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"] {
     transition: border-color .18s var(--gs-ease), box-shadow .18s var(--gs-ease), background .18s var(--gs-ease);
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="base-input"] {
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="base-input"],
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="base-input"] {
     background: transparent !important;
     border-radius: 13px !important;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:hover {
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:hover,
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"]:hover {
     border-color: rgba(129,140,255,0.42) !important;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {
     border-color: var(--gs-accent) !important;
     background: var(--gs-surface-3) !important;
     box-shadow: 0 0 0 4px rgba(110,123,255,0.17), 0 0 30px -8px rgba(110,123,255,0.5) !important;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] input {
+div.st-key-repo_field [data-testid="stTextInput"] input,
+div.st-key-compare_field [data-testid="stTextInput"] input {
     height: 54px;
     padding-left: 48px !important;
     font-size: 1rem;
@@ -641,7 +651,8 @@ div.st-key-repo_field [data-testid="stTextInput"] input {
     background-size: 22px 22px;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] input::placeholder {
+div.st-key-repo_field [data-testid="stTextInput"] input::placeholder,
+div.st-key-compare_field [data-testid="stTextInput"] input::placeholder {
     color: var(--gs-text-3) !important;
     -webkit-text-fill-color: var(--gs-text-3);
     opacity: 1;
@@ -790,7 +801,8 @@ div[class*="st-key-dl_"] { display: flex; justify-content: flex-end; }
 .gs-period-note__muted { color:var(--gs-text-3); }
 
 
-div.st-key-analyze_cta button {
+div.st-key-analyze_cta button,
+div.st-key-compare_cta button {
     min-height: 52px;
     padding: 0 26px;
     border-radius: 13px;
@@ -804,15 +816,19 @@ div.st-key-analyze_cta button {
     transition: transform .18s var(--gs-ease), box-shadow .18s var(--gs-ease), filter .18s var(--gs-ease);
 }
 
-div.st-key-analyze_cta button:hover {
+div.st-key-analyze_cta button:hover,
+div.st-key-compare_cta button:hover {
     transform: translateY(-1px);
     filter: brightness(1.07);
     box-shadow: 0 18px 38px -10px rgba(110,123,255,0.85), inset 0 1px 0 rgba(255,255,255,0.28);
 }
 
-div.st-key-analyze_cta button:active { transform: translateY(0); filter: brightness(0.98); }
-div.st-key-analyze_cta button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
-div.st-key-analyze_cta button p { color: #fff !important; font-weight: 600; }
+div.st-key-analyze_cta button:active,
+div.st-key-compare_cta button:active { transform: translateY(0); filter: brightness(0.98); }
+div.st-key-analyze_cta button:focus-visible,
+div.st-key-compare_cta button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+div.st-key-analyze_cta button p,
+div.st-key-compare_cta button p { color: #fff !important; font-weight: 600; }
 
 
 div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
@@ -1321,6 +1337,18 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-method__rule b { font-weight: 500; color: var(--gs-text-2); }
 .gs-method__foot { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--gs-border); font-size: 0.84rem; color: var(--gs-text-3); }
 
+.gs-cmp { display: flex; flex-direction: column; font-size: 0.9rem; }
+.gs-cmp__head, .gs-cmp__row { display: grid; grid-template-columns: minmax(150px, 1.3fr) minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: center; }
+.gs-cmp__head { padding: 4px 0 12px; border-bottom: 1px solid var(--gs-border-strong); font-weight: 600; color: var(--gs-text); overflow-wrap: anywhere; }
+.gs-cmp__group { margin-top: 18px; padding: 8px 0; font-size: 0.74rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gs-text-3); border-bottom: 1px solid var(--gs-border); }
+.gs-cmp__row { padding: 10px 0; border-bottom: 1px solid var(--gs-border); }
+.gs-cmp__row:last-child { border-bottom: 0; }
+.gs-cmp__metric { color: var(--gs-text-2); }
+.gs-cmp__val { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--gs-text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.gs-cmp__val--na { color: var(--gs-text-3); }
+.gs-cmp__val--lead { font-weight: 600; }
+.gs-cmp__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--gs-success); }
+
 
 .gs-period-note--warn { border-color: rgba(227,169,79,0.35); background: rgba(227,169,79,0.08); }
 
@@ -1394,9 +1422,10 @@ div[data-testid="stSelectboxVirtualDropdown"] [role="option"] * {
     [data-testid="stMainBlockContainer"], .block-container { padding: 1.5rem 1rem 4rem; }
     .gs-title { font-size: 2.05rem; }
     .gs-mark { width: 46px; height: 46px; border-radius: 14px; }
-    div.st-key-control_panel { padding: 18px 16px; border-radius: 16px; }
+    div.st-key-control_panel, div.st-key-compare_panel { padding: 18px 16px; border-radius: 16px; }
     div[class*="st-key-card_"] { padding: 16px 14px 12px; border-radius: 16px; }
     .gs-repo { flex-direction: column; padding: 20px 18px; }
+    .gs-cmp__head, .gs-cmp__row { grid-template-columns: minmax(104px, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
     .gs-section { flex-wrap: wrap; margin-top: 1.8rem; }
     .gs-section__note { margin-left: 0; }
     .gs-kpi__value { font-size: 1.7rem; }
@@ -3708,6 +3737,11 @@ def init_state():
         "analyzed_period": None,
         "xlsx_ready": {},
         "workbook_ready": None,
+        "compare_url_a": "",
+        "compare_url_b": "",
+        "compare_period": COMPARISON_DEFAULT_PERIOD,
+        "comparison": None,
+        "compare_error": None,
     }
 
     for key, value in defaults.items():
@@ -3961,6 +3995,399 @@ def refresh_analysis():
         st.session_state.analyzed_period or "All Time",
         force_refresh=True,
     )
+
+
+def render_compare_panel():
+
+    with st.container(key="compare_panel"):
+
+        render_html(f"""
+        <div class="gs-field-label">
+            <b>{icon('scale', 16)} Compare two repositories</b>
+            <span>Side by side on the same period, using all six analyses</span>
+        </div>
+        """)
+
+        with st.container(key="compare_field"):
+
+            field_cols = st.columns(2, gap="small")
+
+            with field_cols[0]:
+                st.text_input(
+                    "First repository URL",
+                    key="compare_url_a",
+                    placeholder="https://github.com/owner/first-repository",
+                    label_visibility="collapsed",
+                )
+
+            with field_cols[1]:
+                st.text_input(
+                    "Second repository URL",
+                    key="compare_url_b",
+                    placeholder="https://github.com/owner/second-repository",
+                    label_visibility="collapsed",
+                )
+
+        bottom = st.columns([1.3, 2.4, 1.3], gap="medium", vertical_alignment="center")
+
+        with bottom[0]:
+            st.selectbox(
+                "Comparison period",
+                PERIOD_OPTIONS,
+                key="compare_period",
+                label_visibility="collapsed",
+            )
+
+        with bottom[1]:
+            render_html(
+                '<div class="gs-foot-note">Large repositories over long periods take longer and use more GitHub API requests.</div>'
+            )
+
+        with bottom[2]:
+            with st.container(key="compare_cta"):
+                compare_clicked = st.button(
+                    "Compare repositories",
+                    key="compare_btn",
+                    icon=":material/compare_arrows:",
+                    width="stretch",
+                )
+
+    return compare_clicked
+
+
+def clear_comparison():
+
+    st.session_state.comparison = None
+    st.session_state.compare_error = None
+
+
+def execute_comparison(owner_a, repo_a, owner_b, repo_b, period):
+
+    st.session_state.compare_error = None
+    st.session_state.comparison = None
+
+    placeholder = st.empty()
+    executor = ThreadPoolExecutor(max_workers=1)
+    results = []
+    current = f"{owner_a}/{repo_a}"
+
+    try:
+
+        for owner, repo in ((owner_a, repo_a), (owner_b, repo_b)):
+
+            current = f"{owner}/{repo}"
+            tracker = RunTracker()
+
+            future = executor.submit(
+                analyze_repository,
+                owner,
+                repo,
+                selected_analyses=list(ANALYSIS_OPTIONS),
+                period=period,
+                progress=tracker,
+            )
+
+            while True:
+
+                with placeholder.container():
+                    loading_panel(owner, repo, list(ANALYSIS_OPTIONS), period, tracker.snapshot())
+
+                finished, _ = wait([future], timeout=0.4)
+
+                if finished:
+                    break
+
+            results.append(future.result())
+
+    except Exception as exc:
+
+        placeholder.empty()
+
+        kind, message, extra = error_state_for(exc)
+        st.session_state.compare_error = (kind, f"While loading {current}: {message}", extra)
+
+        return
+
+    finally:
+        executor.shutdown(wait=False)
+
+    placeholder.empty()
+
+    st.session_state.comparison = build_repository_comparison(results[0], results[1])
+
+
+def run_comparison():
+
+    owner_a, repo_a = parse_github_url(st.session_state.compare_url_a)
+    owner_b, repo_b = parse_github_url(st.session_state.compare_url_b)
+
+    st.session_state.comparison = None
+
+    if not owner_a or not repo_a or not owner_b or not repo_b:
+
+        st.session_state.compare_error = (
+            "invalid_url",
+            "Enter two GitHub repository URLs in the form https://github.com/owner/repository.",
+            None,
+        )
+
+        return
+
+    if f"{owner_a}/{repo_a}".lower() == f"{owner_b}/{repo_b}".lower():
+
+        st.session_state.compare_error = (
+            "invalid_url",
+            "Choose two different repositories to compare.",
+            None,
+        )
+
+        return
+
+    execute_comparison(owner_a, repo_a, owner_b, repo_b, st.session_state.compare_period)
+
+
+def format_compare_value(kind, value):
+
+    if is_missing(value):
+        return "N/A"
+
+    if kind == "int":
+        return fmt_int(value)
+
+    if kind == "rate":
+        return fmt_rate(value)
+
+    if kind == "percent":
+        return format_percentage(float(value))
+
+    if kind == "signed_percent":
+        return f"{float(value):+.1f}%"
+
+    if kind == "days":
+        return fmt_days(value)
+
+    if kind == "score":
+        return f"{int(round(float(value)))}/100"
+
+    return str(value)
+
+
+def compare_cell(kind, value, leads):
+
+    text = format_compare_value(kind, value)
+    classes = "gs-cmp__val"
+
+    if text == "N/A":
+        classes += " gs-cmp__val--na"
+
+    dot = ""
+
+    if leads:
+        classes += " gs-cmp__val--lead"
+        dot = '<span class="gs-cmp__dot"></span>'
+
+    return f'<div class="{classes}">{dot}<span>{esc(text)}</span></div>'
+
+
+def compare_health_figure(health_chart, name_a, name_b):
+
+    labels = [item["name"] for item in health_chart]
+
+    fig = go.Figure()
+
+    for field, name, color in (
+        ("a", name_a, CHART_COLORS[0]),
+        ("b", name_b, CHART_COLORS[1]),
+    ):
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=[item[field] for item in health_chart],
+                name=name,
+                marker_color=color,
+                texttemplate="%{y:.0f}",
+                textposition="outside",
+                cliponaxis=False,
+            )
+        )
+
+    _style_figure(fig, height=340)
+
+    fig.update_layout(barmode="group", bargap=0.32)
+    fig.update_yaxes(range=[0, 110], title_text="Score out of 100")
+
+    return fig
+
+
+def render_comparison_results(comparison):
+
+    name_a = comparison["name_a"]
+    name_b = comparison["name_b"]
+    values_a = comparison["values_a"]
+    values_b = comparison["values_b"]
+    wins = comparison["wins"]
+    compared = comparison["compared"]
+
+    section_header(
+        "Repository Comparison",
+        f"{name_a} and {name_b} side by side over {comparison['period']}.",
+        "scale",
+    )
+
+    clear_cols = st.columns([1, 0.2], gap="small")
+
+    with clear_cols[1]:
+        st.button("Clear comparison", key="compare_clear_btn", on_click=clear_comparison, width="stretch")
+
+    kpi_grid([
+        {
+            "label": f"{shorten(name_a, 26)} Health",
+            "value": format_compare_value("score", values_a.get("health_overall")),
+            "icon": "activity",
+            "tone": "violet",
+            "hint": f"Higher on {fmt_int(wins['a'])} of {fmt_int(compared)} rows",
+        },
+        {
+            "label": f"{shorten(name_b, 26)} Health",
+            "value": format_compare_value("score", values_b.get("health_overall")),
+            "icon": "activity",
+            "tone": "blue",
+            "hint": f"Higher on {fmt_int(wins['b'])} of {fmt_int(compared)} rows",
+        },
+        {
+            "label": f"{shorten(name_a, 26)} Commits / Day",
+            "value": format_compare_value("rate", values_a.get("commits_per_day")),
+            "icon": "commit",
+            "tone": "violet",
+        },
+        {
+            "label": f"{shorten(name_b, 26)} Commits / Day",
+            "value": format_compare_value("rate", values_b.get("commits_per_day")),
+            "icon": "commit",
+            "tone": "blue",
+        },
+    ])
+
+    table_rows = []
+    export_rows = []
+
+    for group in comparison["groups"]:
+
+        table_rows.append(f'<div class="gs-cmp__group">{esc(group["name"])}</div>')
+
+        for row in group["rows"]:
+
+            table_rows.append(
+                f"""
+                <div class="gs-cmp__row">
+                    <div class="gs-cmp__metric">{esc(row['metric'])}</div>
+                    {compare_cell(row['kind'], row['a'], row['leader'] == 'a')}
+                    {compare_cell(row['kind'], row['b'], row['leader'] == 'b')}
+                </div>
+                """
+            )
+
+            export_rows.append({
+                "Group": group["name"],
+                "Metric": row["metric"],
+                name_a: format_compare_value(row["kind"], row["a"]),
+                name_b: format_compare_value(row["kind"], row["b"]),
+            })
+
+    with card_open(
+        "compare_table",
+        "Side-by-side comparison",
+        "A dot marks the higher value on counts, rates and health scores. Higher does not mean better.",
+    ):
+        render_html(f"""
+        <div class="gs-cmp">
+            <div class="gs-cmp__head">
+                <div></div>
+                <div>{esc(name_a)}</div>
+                <div>{esc(name_b)}</div>
+            </div>
+            {''.join(table_rows)}
+        </div>
+        """)
+
+    visual_card(
+        "compare_health",
+        "Health score breakdown",
+        "The five health components for each repository. Components that could not be measured are left empty.",
+        fig=compare_health_figure(comparison["health_chart"], name_a, name_b),
+        height=340,
+    )
+
+    insights = []
+
+    health_a = values_a.get("health_overall")
+    health_b = values_b.get("health_overall")
+
+    if not is_missing(health_a) and not is_missing(health_b):
+
+        if health_a == health_b:
+            health_body = (
+                f"Both repositories score <strong>{int(health_a)}/100</strong> overall."
+            )
+        else:
+            high, low = (name_a, name_b) if health_a > health_b else (name_b, name_a)
+            high_score, low_score = max(health_a, health_b), min(health_a, health_b)
+            health_body = (
+                f"<strong>{esc(high)}</strong> scores <strong>{int(high_score)}/100</strong> overall against "
+                f"<strong>{int(low_score)}/100</strong> for <strong>{esc(low)}</strong>."
+            )
+
+        insights.append({"icon": "activity", "title": "Health score", "body_html": health_body})
+
+    rate_a = values_a.get("commits_per_day")
+    rate_b = values_b.get("commits_per_day")
+
+    if not is_missing(rate_a) and not is_missing(rate_b):
+
+        insights.append({
+            "icon": "commit",
+            "title": "Commit pace",
+            "body_html": f"<strong>{esc(name_a)}</strong> averages <strong>{fmt_rate(rate_a)}</strong> commits per day "
+                         f"and <strong>{esc(name_b)}</strong> <strong>{fmt_rate(rate_b)}</strong> over {esc(comparison['period'])}.",
+        })
+
+    insights.append({
+        "icon": "scale",
+        "title": "Higher values",
+        "body_html": f"<strong>{esc(name_a)}</strong> is higher on <strong>{fmt_int(wins['a'])}</strong> of "
+                     f"<strong>{fmt_int(compared)}</strong> comparable rows, <strong>{esc(name_b)}</strong> on "
+                     f"<strong>{fmt_int(wins['b'])}</strong>, and <strong>{fmt_int(wins['tie'])}</strong> are tied.",
+    })
+
+    insight_cards(insights)
+
+    visual_card(
+        "compare_export",
+        "Repository comparison",
+        "The comparison as a table you can search and export.",
+        df=pd.DataFrame(export_rows),
+        height=520,
+    )
+
+    render_methodology(
+        "comparison_method",
+        "How the comparison works",
+        "Each figure above follows these rules.",
+        COMPARISON_METHODS,
+        COMPARISON_FOOT,
+    )
+
+
+def render_comparison_area():
+
+    if st.session_state.compare_error:
+
+        kind, message, extra = st.session_state.compare_error
+        render_error(kind, message, extra)
+
+    elif st.session_state.comparison is not None:
+
+        render_comparison_results(st.session_state.comparison)
 
 
 def fmt_reset(epoch):
@@ -4402,16 +4829,23 @@ def main():
 
     analyze_clicked = render_control_panel()
 
+    compare_clicked = render_compare_panel()
+
     refresh_wanted = st.session_state.refresh_requested
     st.session_state.refresh_requested = False
 
     if analyze_clicked:
         run_analysis()
 
+    elif compare_clicked:
+        run_comparison()
+
     elif refresh_wanted and st.session_state.analysis is not None:
         refresh_analysis()
 
     st.write("")
+
+    render_comparison_area()
 
     if st.session_state.error:
 

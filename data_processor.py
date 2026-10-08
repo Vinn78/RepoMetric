@@ -2406,3 +2406,314 @@ HEATMAP_FOOT = (
     "The heatmap describes when commits were recorded, not when people worked or how much effort was spent. "
     "It uses the time a commit was authored, which a developer can set or rewrite."
 )
+
+
+COMPARISON_DEFAULT_PERIOD = "Last 6 Months"
+
+
+def _compare_get(source, *path):
+    value = source
+
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+
+        value = value.get(key)
+
+    return value
+
+
+def _compare_license(repository):
+    license_info = repository.get("license")
+
+    if not isinstance(license_info, dict):
+        return None
+
+    spdx = license_info.get("spdx_id")
+
+    if spdx and spdx != "NOASSERTION":
+        return spdx
+
+    return license_info.get("name")
+
+
+def _compare_day(value):
+    stamp = _utc_stamp(value) if value else None
+
+    if stamp is None:
+        return None
+
+    return _iso_day(stamp)
+
+
+def _compare_top_language(languages_df):
+    if (
+        languages_df is None
+        or languages_df.empty
+        or "language" not in languages_df.columns
+        or "bytes" not in languages_df.columns
+    ):
+        return None, None
+
+    top = languages_df.sort_values("bytes", ascending=False).iloc[0]
+    share = top["percentage"] if "percentage" in languages_df.columns else None
+
+    return str(top["language"]), None if share is None else float(share)
+
+
+def _compare_health(analysis):
+    health = analysis.get("health_score") or {}
+    scores = {"overall": health.get("overall")}
+
+    for component in health.get("components") or []:
+        score = component["score"]
+        scores[component["key"]] = None if score is None else int(round(score))
+
+    return scores
+
+
+def _compare_rows(analysis):
+    repository = analysis.get("repository") or {}
+    commit_metrics = analysis.get("commit_metrics") or {}
+    trend = analysis.get("commit_activity_trend") or {}
+    velocity = analysis.get("commit_velocity") or {}
+    contributors = analysis.get("contributor_metrics") or {}
+    concentration = analysis.get("contributor_concentration") or {}
+    issues = analysis.get("issue_metrics") or {}
+    issue_resolution = analysis.get("issue_resolution") or {}
+    pulls = analysis.get("pull_request_metrics") or {}
+    pull_health = analysis.get("pull_request_health") or {}
+    cadence = analysis.get("release_cadence") or {}
+    languages = analysis.get("languages")
+    health = _compare_health(analysis)
+    top_language, top_language_share = _compare_top_language(languages)
+
+    language_count = (
+        int(len(languages))
+        if isinstance(languages, pd.DataFrame) and not languages.empty
+        else None
+    )
+
+    has_issues = bool(issues)
+    has_pulls = bool(pulls)
+
+    return {
+        "stars": repository.get("stargazers_count"),
+        "forks": repository.get("forks_count"),
+        "open_issues_and_prs": repository.get("open_issues_count"),
+        "primary_language": repository.get("language"),
+        "license": _compare_license(repository),
+        "created": _compare_day(repository.get("created_at")),
+        "last_push": _compare_day(repository.get("pushed_at")),
+        "archived": "Yes" if repository.get("archived") else "No",
+        "commits": commit_metrics.get("total_commits"),
+        "commits_per_day": velocity.get("per_day"),
+        "active_days": trend.get("active_days"),
+        "commit_change": _compare_get(velocity, "comparison", "change_pct"),
+        "contributors": contributors.get("total_contributors"),
+        "top_contributor": contributors.get("top_contributor"),
+        "top_share": concentration.get("top_contributor_concentration"),
+        "top_3_share": concentration.get("top_3_contributor_concentration"),
+        "issues_total": issues.get("total_issues") if has_issues else None,
+        "issues_closed": issues.get("closed_issues") if has_issues else None,
+        "issue_closure_rate": (
+            issues.get("closure_rate")
+            if has_issues and issues.get("total_issues")
+            else None
+        ),
+        "issue_median_close": issue_resolution.get("median_days_to_close"),
+        "pulls_total": pulls.get("total_pull_requests") if has_pulls else None,
+        "pulls_merged": pulls.get("merged_pull_requests") if has_pulls else None,
+        "pull_merge_rate": (
+            pulls.get("merge_rate")
+            if has_pulls and pulls.get("total_pull_requests")
+            else None
+        ),
+        "pull_median_merge": pull_health.get("median_days_to_merge"),
+        "releases": cadence.get("published_count"),
+        "latest_release": cadence.get("latest_tag"),
+        "latest_release_age": cadence.get("latest_age_days"),
+        "release_interval": cadence.get("median_interval_days"),
+        "release_cadence": cadence.get("cadence_label"),
+        "language_count": language_count,
+        "top_language": top_language,
+        "top_language_share": top_language_share,
+        "health_overall": health.get("overall"),
+        "health_activity": health.get("activity"),
+        "health_collaboration": health.get("collaboration"),
+        "health_issues": health.get("issues"),
+        "health_pull_requests": health.get("pull_requests"),
+        "health_releases": health.get("releases"),
+    }
+
+
+COMPARISON_LAYOUT = [
+    ("Repository", [
+        ("stars", "Stars", "int", True),
+        ("forks", "Forks", "int", True),
+        ("open_issues_and_prs", "Open issues and PRs (GitHub count)", "int", False),
+        ("primary_language", "Primary language", "text", False),
+        ("license", "License", "text", False),
+        ("created", "Created", "text", False),
+        ("last_push", "Last push", "text", False),
+        ("archived", "Archived", "text", False),
+    ]),
+    ("Commit activity", [
+        ("commits", "Commits", "int", True),
+        ("commits_per_day", "Commits per day", "rate", True),
+        ("active_days", "Active days", "int", True),
+        ("commit_change", "Change vs previous period", "signed_percent", False),
+    ]),
+    ("Contributors", [
+        ("contributors", "Contributors", "int", True),
+        ("top_contributor", "Top contributor", "text", False),
+        ("top_share", "Top contributor share", "percent", False),
+        ("top_3_share", "Top 3 contributors share", "percent", False),
+    ]),
+    ("Issues", [
+        ("issues_total", "Issues opened", "int", True),
+        ("issues_closed", "Issues closed", "int", True),
+        ("issue_closure_rate", "Issue closure rate", "percent", True),
+        ("issue_median_close", "Median time to close", "days", False),
+    ]),
+    ("Pull requests", [
+        ("pulls_total", "Pull requests opened", "int", True),
+        ("pulls_merged", "Pull requests merged", "int", True),
+        ("pull_merge_rate", "Merge rate", "percent", True),
+        ("pull_median_merge", "Median time to merge", "days", False),
+    ]),
+    ("Releases", [
+        ("releases", "Releases published", "int", True),
+        ("latest_release", "Latest release", "text", False),
+        ("latest_release_age", "Latest release age", "days", False),
+        ("release_interval", "Median days between releases", "days", False),
+        ("release_cadence", "Release cadence", "text", False),
+    ]),
+    ("Languages", [
+        ("language_count", "Languages detected", "int", False),
+        ("top_language", "Top language", "text", False),
+        ("top_language_share", "Top language share", "percent", False),
+    ]),
+    ("Health score", [
+        ("health_overall", "Overall health score", "score", True),
+        ("health_activity", "Activity", "score", True),
+        ("health_collaboration", "Collaboration", "score", True),
+        ("health_issues", "Issues", "score", True),
+        ("health_pull_requests", "PR Health", "score", True),
+        ("health_releases", "Releases", "score", True),
+    ]),
+]
+
+COMPARISON_HEALTH_KEYS = [
+    ("health_activity", "Activity"),
+    ("health_collaboration", "Collaboration"),
+    ("health_issues", "Issues"),
+    ("health_pull_requests", "PR Health"),
+    ("health_releases", "Releases"),
+]
+
+
+def _compare_is_number(value):
+    if value is None or isinstance(value, bool):
+        return False
+
+    try:
+        return not math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _compare_leader(value_a, value_b):
+    if not (_compare_is_number(value_a) and _compare_is_number(value_b)):
+        return None
+
+    if float(value_a) > float(value_b):
+        return "a"
+
+    if float(value_b) > float(value_a):
+        return "b"
+
+    return "tie"
+
+
+def build_repository_comparison(analysis_a, analysis_b):
+    values_a = _compare_rows(analysis_a)
+    values_b = _compare_rows(analysis_b)
+
+    groups = []
+    wins = {"a": 0, "b": 0, "tie": 0}
+
+    for group_name, items in COMPARISON_LAYOUT:
+        rows = []
+
+        for key, label, kind, comparable in items:
+            value_a = values_a.get(key)
+            value_b = values_b.get(key)
+            leader = _compare_leader(value_a, value_b) if comparable else None
+
+            if leader is not None:
+                wins[leader] += 1
+
+            rows.append(
+                {
+                    "key": key,
+                    "metric": label,
+                    "kind": kind,
+                    "a": value_a,
+                    "b": value_b,
+                    "leader": leader,
+                }
+            )
+
+        groups.append({"name": group_name, "rows": rows})
+
+    health_chart = [
+        {"name": label, "a": values_a.get(key), "b": values_b.get(key)}
+        for key, label in COMPARISON_HEALTH_KEYS
+    ]
+
+    return {
+        "name_a": (analysis_a.get("repository") or {}).get("full_name") or "Repository A",
+        "name_b": (analysis_b.get("repository") or {}).get("full_name") or "Repository B",
+        "period": analysis_a.get("period"),
+        "groups": groups,
+        "wins": wins,
+        "compared": wins["a"] + wins["b"] + wins["tie"],
+        "health_chart": health_chart,
+        "values_a": values_a,
+        "values_b": values_b,
+    }
+
+
+COMPARISON_METHODS = [
+    {
+        "name": "Same window for both",
+        "summary": "Both repositories are analyzed with the same period and all six analyses, so figures describe the same stretch of time.",
+        "rules": [
+            ("Repository facts", "Stars, forks, language, license, creation date, last push and the open issue count describe the repository today and ignore the period. GitHub's open issue count includes open pull requests."),
+            ("Period figures", "Commits, contributors, issues, pull requests and releases cover only the selected period. Languages are repository level."),
+            ("Cached results", "A repository already analyzed with all analyses and the same period is reused from cache instead of being fetched again."),
+        ],
+    },
+    {
+        "name": "Higher value marker",
+        "summary": "The higher number in a row is marked with a dot. It means higher, not better.",
+        "rules": [
+            ("Marked rows", "Counts, rates and health scores. Rows such as durations, shares and text are shown without a marker because higher or lower is not clearly better."),
+            ("Ties and gaps", "Equal values are not marked. A row where either value is unavailable is not marked."),
+            ("Higher count", "The summary counts how many marked rows each repository is higher on. Repositories of very different sizes will naturally differ on raw counts, so read the rates and health scores alongside them."),
+        ],
+    },
+    {
+        "name": "Health score",
+        "summary": "The same health score used for a single repository, with the same weights and rules.",
+        "rules": [
+            ("Components", "Activity, Collaboration, Issues, PR Health and Releases. A component that cannot be measured is shown as N/A and left out of the overall score."),
+        ],
+    },
+]
+
+COMPARISON_FOOT = (
+    "A comparison shows how two repositories differ on recorded activity. It does not rank their quality, "
+    "and differences in size, age or workflow can explain many of the gaps."
+)
