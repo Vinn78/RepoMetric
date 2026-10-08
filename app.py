@@ -29,6 +29,18 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
+from data_processor import (
+    ISSUE_RESOLUTION_FOOT,
+    ISSUE_RESOLUTION_METHODS,
+    PR_HEALTH_FOOT,
+    PR_HEALTH_METHODS,
+    RELEASE_CADENCE_FOOT,
+    RELEASE_CADENCE_METHODS,
+    STALE_ISSUE_DAYS,
+    STALE_PR_DAYS,
+    VELOCITY_FOOT,
+    VELOCITY_METHODS,
+)
 from github_api import PERIOD_OPTIONS, analyze_repository
 
 st.set_page_config(
@@ -2603,6 +2615,679 @@ def render_releases_section(analysis, owner, repo):
         render_html(f'<div class="gs-tl">{"".join(items)}</div>')
 
 
+def fmt_days(value):
+
+    if is_missing(value):
+        return "N/A"
+
+    days = float(value)
+
+    if days < 1:
+        return f"{days * 24:.1f} hrs"
+
+    if days >= 730:
+        return f"{days / 365.25:.1f} years"
+
+    if days >= 100:
+        return f"{days:,.0f} days"
+
+    return f"{days:,.1f} days"
+
+
+def fmt_rate(value):
+
+    if is_missing(value):
+        return "N/A"
+
+    number = float(value)
+
+    return f"{number:,.2f}" if number < 10 else f"{number:,.1f}"
+
+
+def fmt_span(start, end):
+
+    return f"{fmt_date(start)} – {fmt_date(end)}"
+
+
+def shorten(text, limit=46):
+
+    text = str(text or "").strip()
+
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def render_methodology(key, title, subtitle, methods, foot):
+
+    rows = []
+
+    for item in methods:
+
+        rules = "".join(
+            f'<div class="gs-method__rule"><b>{esc(label)}:</b> {esc(rule)}</div>'
+            for label, rule in item["rules"]
+        )
+
+        rows.append(f"""
+        <div class="gs-method__row">
+            <div class="gs-method__name">{esc(item['name'])}</div>
+            <div class="gs-method__body">{esc(item['summary'])}{rules}</div>
+        </div>
+        """)
+
+    with card_open(key, title, subtitle):
+        render_html(f"""
+        <div class="gs-method">
+            {''.join(rows)}
+            <div class="gs-method__foot">{esc(foot)}</div>
+        </div>
+        """)
+
+
+def velocity_weekly_figure(weekly_df):
+
+    ordered = weekly_df.sort_values("week_start")
+
+    colors = [
+        CHART_COLORS[0] if done else "rgba(117,131,255,0.38)"
+        for done in ordered["complete"]
+    ]
+
+    details = pd.DataFrame({
+        "end": ordered["week_end"].dt.strftime("%d %b %Y"),
+        "status": [
+            "Complete week" if done else "Partial week, not used for the peak"
+            for done in ordered["complete"]
+        ],
+    })
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=ordered["week_start"], y=ordered["commits"],
+        name="Commits",
+        marker=dict(color=colors, line=dict(width=0)),
+        customdata=details.to_numpy(),
+        hovertemplate=(
+            "<b>Week of %{x|%d %b %Y}</b><br>"
+            "%{y} commit(s)<br>"
+            "Ends %{customdata[0]}<br>"
+            "%{customdata[1]}"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.update_yaxes(rangemode="tozero", title_text="Commits")
+    fig.update_xaxes(title_text=None)
+
+    return _style_figure(fig, legend=False)
+
+
+def grouped_monthly_figure(monthly_df, series):
+
+    fig = go.Figure()
+
+    for column, name, color in series:
+
+        fig.add_trace(go.Bar(
+            x=monthly_df["month"], y=monthly_df[column],
+            name=name,
+            marker=dict(color=color, line=dict(width=0)),
+            hovertemplate=f"<b>%{{x}}</b><br>%{{y}} {name.lower()}<extra></extra>",
+        ))
+
+    fig.update_layout(barmode="group")
+    fig.update_yaxes(rangemode="tozero", title_text="Count")
+    fig.update_xaxes(title_text=None, type="category")
+
+    return _style_figure(fig, legend=True)
+
+
+def age_band_figure(aging_df):
+
+    colors = [CHART_COLORS[2]] * (len(aging_df) - 1) + [THEME["warning"]]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=aging_df["age_band"], y=aging_df["count"],
+        name="Open",
+        marker=dict(color=colors, line=dict(width=0)),
+        customdata=aging_df[["share"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "%{y} open<br>"
+            "%{customdata[0]:.1f}% of open"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.update_yaxes(rangemode="tozero", title_text="Open items")
+    fig.update_xaxes(title_text=None, type="category")
+
+    return _style_figure(fig, legend=False)
+
+
+def release_interval_figure(intervals_df, median_days):
+
+    ordered = intervals_df.sort_values("published_at")
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=ordered["published_at"], y=ordered["days_since_previous"],
+        name="Days since previous release",
+        marker=dict(color=CHART_COLORS[2], line=dict(width=0)),
+        customdata=ordered[["tag"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "%{x|%d %b %Y}<br>"
+            "%{y:.1f} days after the previous release"
+            "<extra></extra>"
+        ),
+    ))
+
+    if median_days is not None and len(ordered) > 1:
+
+        fig.add_trace(go.Scatter(
+            x=[ordered["published_at"].min(), ordered["published_at"].max()],
+            y=[median_days, median_days],
+            mode="lines",
+            name=f"Median {median_days:.1f} days",
+            line=dict(color=THEME["warning"], width=1.8, dash="dash"),
+            hovertemplate=f"Median {median_days:.1f} days<extra></extra>",
+        ))
+
+    fig.update_yaxes(rangemode="tozero", title_text="Days")
+    fig.update_xaxes(title_text=None)
+
+    return _style_figure(fig, legend=True)
+
+
+def render_commit_velocity(analysis):
+
+    velocity = analysis.get("commit_velocity") or {}
+
+    if not velocity:
+        return
+
+    section_header(
+        "Commit Velocity",
+        "How many commits land per day, week and month, and how that compares with the previous period.",
+        "trending",
+    )
+
+    comparison = velocity["comparison"]
+    window_days = velocity["window_days"]
+
+    if window_days is None:
+        window_hint = "No commits found"
+        week_hint = month_hint = window_hint
+    else:
+        window_hint = f"Over {window_days:,.0f} days"
+        week_hint = window_hint if velocity["per_week"] is not None else "Needs a window of at least 7 days"
+        month_hint = window_hint if velocity["per_month"] is not None else "Needs a window of at least 30 days"
+
+    if comparison["change_pct"] is not None:
+        change_value = f"{comparison['change_pct']:+.1f}%"
+    elif comparison["change_abs"] is not None:
+        change_value = (
+            "No change"
+            if comparison["change_abs"] == 0
+            else f"{comparison['change_abs']:+,d} commit{'' if abs(comparison['change_abs']) == 1 else 's'}"
+        )
+    else:
+        change_value = "N/A"
+
+    if comparison["prior_commits"] is not None:
+        change_hint = f"{fmt_int(comparison['current_commits'])} vs {fmt_int(comparison['prior_commits'])} commits"
+    else:
+        change_hint = "Not comparable"
+
+    peak_week = velocity["peak_week"]
+    peak_month = velocity["peak_month"]
+
+    kpi_grid([
+        {"label": "Commits / Day", "value": fmt_rate(velocity["per_day"]), "icon": "activity", "tone": "blue", "hint": window_hint},
+        {"label": "Commits / Week", "value": fmt_rate(velocity["per_week"]), "icon": "calendar", "tone": "violet", "hint": week_hint},
+        {"label": "Commits / Month", "value": fmt_rate(velocity["per_month"]), "icon": "calendar", "tone": "success", "hint": month_hint},
+        {"label": "Change vs Previous Period", "value": change_value, "icon": "trending", "tone": "blue", "hint": change_hint},
+    ])
+
+    kpi_grid([
+        {
+            "label": "Peak Week",
+            "value": fmt_span(peak_week["start"], peak_week["end"]) if peak_week else "N/A",
+            "icon": "commit",
+            "tone": "warning",
+            "wrap_text": True,
+            "hint": f"{fmt_int(peak_week['commits'])} commit(s)" if peak_week else "No complete week with commits",
+        },
+        {
+            "label": "Peak Month",
+            "value": pd.Timestamp(peak_month["start"]).strftime("%B %Y") if peak_month else "N/A",
+            "icon": "commit",
+            "tone": "warning",
+            "wrap_text": True,
+            "hint": f"{fmt_int(peak_month['commits'])} commit(s)" if peak_month else "No complete month with commits",
+        },
+    ])
+
+    if comparison["prior_start"]:
+        render_html(
+            f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+            f'<span class="gs-period-note__icon">{icon("calendar", 15, 1.9)}</span>'
+            f'<span><b>Previous period:</b> {esc(fmt_span(comparison["prior_start"], comparison["prior_end"]))}</span>'
+            f'</div>'
+        )
+
+    if comparison["status"] != "comparable" and comparison["reason"]:
+        notice(
+            "info",
+            "No percentage change shown" if comparison["status"] == "limited" else "Change vs previous period unavailable",
+            comparison["reason"],
+        )
+
+    weekly = analysis["commit_velocity_weekly"]
+
+    if velocity["commits"] == 0 or weekly.empty:
+
+        empty_state("No commits to chart", "There were no commits in the selected window, so there is no weekly activity to show.", "commit")
+
+    else:
+
+        table = weekly.sort_values("week_start", ascending=False)
+
+        visual_card(
+            "velocity_weekly",
+            "Weekly commits",
+            f"Commits per Monday-to-Sunday week. Lighter bars are partial weeks and are never chosen as the peak ({velocity['complete_weeks']} of {velocity['total_weeks']} weeks are complete).",
+            fig=velocity_weekly_figure(weekly),
+            df=table,
+            column_config={
+                "week_start": st.column_config.DatetimeColumn("Week starts (Mon)", format="D MMM YYYY"),
+                "week_end": st.column_config.DatetimeColumn("Week ends (Sun)", format="D MMM YYYY"),
+                "commits": st.column_config.NumberColumn("Commits", format="%d"),
+                "complete": st.column_config.CheckboxColumn("Complete week"),
+            },
+            height=360,
+        )
+
+    render_methodology(
+        "velocity_method",
+        "How commit velocity is calculated",
+        "Each figure above follows these rules.",
+        VELOCITY_METHODS,
+        VELOCITY_FOOT,
+    )
+
+
+def render_issue_resolution(analysis):
+
+    metrics = analysis.get("issue_resolution") or {}
+
+    if not metrics or analysis["issues"].empty:
+        return
+
+    section_header(
+        "Issue Resolution",
+        "How long issues take to close, how long open ones have waited, and how issue volume moves month to month.",
+        "issue",
+    )
+
+    closed_hint = (
+        f"Across {fmt_int(metrics['closed_with_duration'])} closed issue(s)"
+        if metrics["closed_with_duration"]
+        else "No closed issues in this window"
+    )
+
+    oldest = metrics["oldest_open"]
+
+    if oldest:
+        oldest_value = fmt_days(oldest["age_days"])
+        oldest_hint = f"#{oldest['number']} · {shorten(oldest['title'])}"
+    else:
+        oldest_value = "None open"
+        oldest_hint = "Every issue in this window is closed"
+
+    if metrics["open_count"]:
+        stale_hint = f"{format_percentage(metrics['stale_open_share'])} of {fmt_int(metrics['open_count'])} open issue(s)"
+    else:
+        stale_hint = "No open issues"
+
+    kpi_grid([
+        {"label": "Median Time to Close", "value": fmt_days(metrics["median_days_to_close"]), "icon": "clock", "tone": "blue", "hint": closed_hint},
+        {"label": "Average Time to Close", "value": fmt_days(metrics["average_days_to_close"]), "icon": "clock", "tone": "violet", "hint": closed_hint},
+        {"label": "Oldest Open Issue", "value": oldest_value, "icon": "alert", "tone": "warning", "hint": oldest_hint},
+        {"label": f"Open Over {STALE_ISSUE_DAYS} Days", "value": fmt_int(metrics["stale_open_count"]), "icon": "alert", "tone": "warning", "hint": stale_hint},
+    ])
+
+    monthly = analysis["issue_monthly"]
+
+    if not monthly.empty:
+
+        visual_card(
+            "issues_monthly",
+            "Issues opened and closed per month",
+            "Issues created each month and issues from this window closed each month.",
+            fig=grouped_monthly_figure(
+                monthly,
+                [("opened", "Opened", CHART_COLORS[0]), ("closed", "Closed", THEME["success"])],
+            ),
+            df=monthly,
+            column_config={
+                "month": st.column_config.TextColumn("Month"),
+                "opened": st.column_config.NumberColumn("Opened", format="%d"),
+                "closed": st.column_config.NumberColumn("Closed", format="%d"),
+            },
+            height=320,
+        )
+
+    aging = analysis["issue_aging"]
+
+    if metrics["open_count"] and not aging.empty:
+
+        visual_card(
+            "issues_aging",
+            "Open issue aging",
+            f"How long currently open issues have been waiting. The last band is stale (over {STALE_ISSUE_DAYS} days).",
+            fig=age_band_figure(aging),
+            df=aging,
+            column_config={
+                "age_band": st.column_config.TextColumn("Age"),
+                "count": st.column_config.NumberColumn("Open issues", format="%d"),
+                "share": st.column_config.NumberColumn("Share of open", format="%.1f%%"),
+            },
+            height=280,
+        )
+
+    render_methodology(
+        "issue_resolution_method",
+        "How issue resolution is calculated",
+        "Each figure above follows these rules.",
+        ISSUE_RESOLUTION_METHODS,
+        ISSUE_RESOLUTION_FOOT,
+    )
+
+
+def render_pull_request_health(analysis):
+
+    metrics = analysis.get("pull_request_health") or {}
+
+    if not metrics or analysis["pull_requests"].empty:
+        return
+
+    section_header(
+        "Pull Request Health",
+        "How long pull requests take to merge, how many are closed without merging, and how long open ones have waited.",
+        "pull_request",
+    )
+
+    merged_hint = (
+        f"Across {fmt_int(metrics['merged_with_duration'])} merged PR(s)"
+        if metrics["merged_with_duration"]
+        else "No merged PRs in this window"
+    )
+
+    if metrics["closed_count"]:
+        unmerged_hint = f"{format_percentage(metrics['closed_unmerged_share'])} of {fmt_int(metrics['closed_count'])} closed PR(s)"
+    else:
+        unmerged_hint = "No closed PRs in this window"
+
+    oldest = metrics["oldest_open"]
+
+    if metrics["open_count"]:
+        stale_hint = f"{format_percentage(metrics['stale_open_share'])} of {fmt_int(metrics['open_count'])} open PR(s)"
+        if oldest:
+            stale_hint += f" · oldest {fmt_days(oldest['age_days'])} (#{oldest['number']})"
+    else:
+        stale_hint = "No open PRs"
+
+    kpi_grid([
+        {"label": "Median Time to Merge", "value": fmt_days(metrics["median_days_to_merge"]), "icon": "merge", "tone": "blue", "hint": merged_hint},
+        {"label": "Average Time to Merge", "value": fmt_days(metrics["average_days_to_merge"]), "icon": "merge", "tone": "violet", "hint": merged_hint},
+        {"label": "Closed Without Merge", "value": fmt_int(metrics["closed_unmerged_count"]), "icon": "pull_request", "tone": "warning", "hint": unmerged_hint},
+        {"label": f"Open Over {STALE_PR_DAYS} Days", "value": fmt_int(metrics["stale_open_count"]), "icon": "alert", "tone": "warning", "hint": stale_hint},
+    ])
+
+    monthly = analysis["pull_request_monthly"]
+
+    if not monthly.empty:
+
+        visual_card(
+            "pr_monthly",
+            "Pull requests per month",
+            "Pull requests opened each month, and pull requests from this window merged or closed without merge each month.",
+            fig=grouped_monthly_figure(
+                monthly,
+                [
+                    ("opened", "Opened", CHART_COLORS[0]),
+                    ("merged", "Merged", CHART_COLORS[1]),
+                    ("closed_unmerged", "Closed without merge", THEME["warning"]),
+                ],
+            ),
+            df=monthly,
+            column_config={
+                "month": st.column_config.TextColumn("Month"),
+                "opened": st.column_config.NumberColumn("Opened", format="%d"),
+                "merged": st.column_config.NumberColumn("Merged", format="%d"),
+                "closed_unmerged": st.column_config.NumberColumn("Closed without merge", format="%d"),
+            },
+            height=320,
+        )
+
+    aging = analysis["pull_request_aging"]
+
+    if metrics["open_count"] and not aging.empty:
+
+        visual_card(
+            "pr_aging",
+            "Open pull request aging",
+            f"How long currently open pull requests have been waiting. The last band is stale (over {STALE_PR_DAYS} days).",
+            fig=age_band_figure(aging),
+            df=aging,
+            column_config={
+                "age_band": st.column_config.TextColumn("Age"),
+                "count": st.column_config.NumberColumn("Open PRs", format="%d"),
+                "share": st.column_config.NumberColumn("Share of open", format="%.1f%%"),
+            },
+            height=280,
+        )
+
+    render_methodology(
+        "pr_health_method",
+        "How pull request health is calculated",
+        "Each figure above follows these rules.",
+        PR_HEALTH_METHODS,
+        PR_HEALTH_FOOT,
+    )
+
+
+def render_release_cadence(analysis):
+
+    metrics = analysis.get("release_cadence") or {}
+
+    if not metrics or not metrics.get("published_count"):
+        return
+
+    section_header(
+        "Release Cadence",
+        "How regularly releases are published and how long ago the latest one shipped.",
+        "tag",
+    )
+
+    if metrics["median_interval_days"] is not None:
+        median_hint = f"Between {fmt_int(metrics['published_count'])} releases"
+        longest_hint = f"Shortest gap {fmt_days(metrics['shortest_interval_days'])}"
+    else:
+        median_hint = "Needs at least 2 releases"
+        longest_hint = "Needs at least 2 releases"
+
+    if metrics["cadence_label"]:
+        label_value = metrics["cadence_label"]
+        label_hint = f"Median gap {fmt_days(metrics['median_interval_days'])}"
+    else:
+        label_value = "N/A"
+        label_hint = metrics["cadence_reason"]
+
+    kpi_grid([
+        {"label": "Cadence", "value": label_value, "icon": "tag", "tone": "violet", "wrap_text": True, "hint": label_hint},
+        {"label": "Median Interval", "value": fmt_days(metrics["median_interval_days"]), "icon": "clock", "tone": "blue", "hint": median_hint},
+        {"label": "Latest Release Age", "value": fmt_days(metrics["latest_age_days"]), "icon": "package", "tone": "success", "hint": metrics["latest_tag"]},
+        {"label": "Longest Gap", "value": fmt_days(metrics["longest_interval_days"]), "icon": "calendar", "tone": "warning", "hint": longest_hint},
+    ])
+
+    intervals = analysis["release_intervals"]
+
+    if not intervals.empty:
+
+        table = intervals.sort_values("published_at", ascending=False)
+
+        visual_card(
+            "release_intervals",
+            "Days between releases",
+            "Gap between each release and the one before it, with the median shown as a dashed line.",
+            fig=release_interval_figure(intervals, metrics["median_interval_days"]),
+            df=table,
+            column_config={
+                "tag": st.column_config.TextColumn("Release"),
+                "published_at": st.column_config.DatetimeColumn("Published", format="D MMM YYYY"),
+                "days_since_previous": st.column_config.NumberColumn("Days since previous release", format="%.1f"),
+            },
+            height=320,
+        )
+
+    render_methodology(
+        "release_cadence_method",
+        "How release cadence is calculated",
+        "Each figure above follows these rules.",
+        RELEASE_CADENCE_METHODS,
+        RELEASE_CADENCE_FOOT,
+    )
+
+
+def render_repository_snapshot(analysis, selected):
+
+    repository = analysis["repository"]
+    now = pd.Timestamp.now(tz="UTC")
+
+    section_header(
+        "Repository Snapshot",
+        "The headline numbers from every section below, in one place.",
+        "bulb",
+    )
+
+    cards = []
+
+    created = to_timestamp(repository.get("created_at"))
+    pushed = to_timestamp(repository.get("pushed_at"))
+
+    if created is not None:
+        cards.append({
+            "label": "Repository Age",
+            "value": fmt_days((now - created).total_seconds() / 86400),
+            "icon": "calendar",
+            "tone": "blue",
+            "hint": f"Created {fmt_date(created)}",
+        })
+
+    if pushed is not None:
+        cards.append({
+            "label": "Last Push",
+            "value": fmt_date(pushed),
+            "icon": "upload",
+            "tone": "violet",
+            "hint": f"{fmt_days(max(0.0, (now - pushed).total_seconds() / 86400))} ago",
+        })
+
+    health = analysis.get("health_score") or {}
+
+    if health.get("overall") is not None:
+        cards.append({
+            "label": "Health Score",
+            "value": f"{health['overall']} / 100",
+            "icon": "activity",
+            "tone": health_tone(health["overall"]),
+            "hint": health["label"],
+        })
+
+    if "Commits" in selected:
+
+        velocity = analysis.get("commit_velocity") or {}
+        total = (analysis.get("commit_metrics") or {}).get("total_commits", 0)
+
+        if velocity.get("per_week") is not None:
+            commit_hint = f"{fmt_rate(velocity['per_week'])} per week"
+        elif velocity.get("per_day") is not None:
+            commit_hint = f"{fmt_rate(velocity['per_day'])} per day"
+        else:
+            commit_hint = "No commits in this window"
+
+        cards.append({"label": "Commits", "value": fmt_int(total), "icon": "commit", "tone": "blue", "hint": commit_hint})
+
+    if "Contributors" in selected:
+
+        contributors = analysis.get("contributor_metrics") or {}
+        concentration = analysis.get("contributor_concentration") or {}
+        count = contributors.get("total_contributors", 0)
+
+        cards.append({
+            "label": "Contributors",
+            "value": fmt_int(count),
+            "icon": "users",
+            "tone": "violet",
+            "hint": f"Top 5 share {format_percentage(concentration.get('top_5_contributor_concentration', 0.0))}" if count else "No contributors found",
+        })
+
+    if "Issues" in selected:
+
+        issue_metrics = analysis.get("issue_metrics") or {}
+        resolution = analysis.get("issue_resolution") or {}
+        total = issue_metrics.get("total_issues", 0)
+
+        if total:
+            hint = f"of {fmt_int(total)} · median close {fmt_days(resolution.get('median_days_to_close'))}"
+        else:
+            hint = "No issues in this window"
+
+        cards.append({"label": "Issues Still Open", "value": fmt_int(issue_metrics.get("open_issues", 0)), "icon": "issue", "tone": "warning", "hint": hint})
+
+    if "Pull Requests" in selected:
+
+        pr_metrics = analysis.get("pull_request_metrics") or {}
+        pr_health = analysis.get("pull_request_health") or {}
+        total = pr_metrics.get("total_pull_requests", 0)
+
+        if total:
+            hint = f"of {fmt_int(total)} · median merge {fmt_days(pr_health.get('median_days_to_merge'))}"
+        else:
+            hint = "No pull requests in this window"
+
+        cards.append({"label": "PRs Still Open", "value": fmt_int(pr_metrics.get("open_pull_requests", 0)), "icon": "pull_request", "tone": "warning", "hint": hint})
+
+    if "Releases" in selected:
+
+        cadence = analysis.get("release_cadence") or {}
+
+        if cadence.get("published_count"):
+            hint = f"{fmt_days(cadence['latest_age_days'])} ago"
+            if cadence.get("cadence_label"):
+                hint += f" · {cadence['cadence_label']}"
+            cards.append({"label": "Latest Release", "value": cadence["latest_tag"], "icon": "tag", "tone": "success", "wrap_text": True, "hint": hint})
+        else:
+            cards.append({"label": "Latest Release", "value": "N/A", "icon": "tag", "tone": "success", "hint": "No published releases in this window"})
+
+    for start in range(0, len(cards), 4):
+        kpi_grid(cards[start:start + 4])
+
+    render_html(
+        f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+        f'<span class="gs-period-note__icon">{icon("info", 15, 1.9)}</span>'
+        f'<span>Every figure here is taken from the section that follows it; nothing is calculated separately. '
+        f'Repository age and last push are repository-level, and the rest cover the selected analysis window.</span>'
+        f'</div>'
+    )
+
+
 def init_state():
 
     defaults = {
@@ -2868,26 +3553,32 @@ def render_results():
 
         render_repository_overview(analysis["repository"], owner, repo)
 
+        render_repository_snapshot(analysis, selected)
+
         if selected:
             render_health_score(analysis)
 
         if "Commits" in selected:
             render_commits_section(analysis)
+            render_commit_velocity(analysis)
 
         if "Contributors" in selected:
             render_contributors_section(analysis)
 
         if "Issues" in selected:
             render_issues_section(analysis)
+            render_issue_resolution(analysis)
 
         if "Pull Requests" in selected:
             render_pull_requests_section(analysis)
+            render_pull_request_health(analysis)
 
         if "Languages" in selected:
             render_languages_section(analysis)
 
         if "Releases" in selected:
             render_releases_section(analysis, owner, repo)
+            render_release_cadence(analysis)
 
 
 def main():

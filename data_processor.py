@@ -1245,3 +1245,841 @@ def calculate_health_score(
         "available_count": len(available),
         "total_count": len(components),
     }
+
+
+DAYS_PER_MONTH = 365.25 / 12
+VELOCITY_MIN_PRIOR_COMMITS = 5
+VELOCITY_MIN_WEEK_DAYS = 7
+VELOCITY_MIN_MONTH_DAYS = 30
+VELOCITY_MIN_WINDOW_DAYS = 1.0
+
+ISSUE_AGE_LIMITS = [7, 30, 90, STALE_ISSUE_DAYS]
+PR_AGE_LIMITS = [7, 30, STALE_PR_DAYS]
+
+RELEASE_CADENCE_BANDS = [
+    (8, "Weekly"),
+    (16, "Biweekly"),
+    (45, "Monthly"),
+    (100, "Quarterly"),
+    (200, "Twice a year"),
+    (400, "Yearly"),
+]
+RELEASE_CADENCE_FALLBACK = "Less often than yearly"
+RELEASE_CADENCE_MIN_RELEASES = 3
+
+VELOCITY_REASON_ALL_TIME = (
+    "All Time has no previous period to compare against. Choose a fixed period to see a change."
+)
+VELOCITY_REASON_FETCH = (
+    "The previous period could not be loaded from GitHub, so no change is shown."
+)
+VELOCITY_REASON_HISTORY = (
+    "The repository history does not cover the whole previous period, so a change would not compare like with like."
+)
+
+
+def _utc_stamp(value):
+
+    if value is None:
+        return None
+
+    stamp = pd.Timestamp(value)
+
+    if pd.isna(stamp):
+        return None
+
+    if stamp.tzinfo is None:
+        return stamp.tz_localize("UTC")
+
+    return stamp.tz_convert("UTC")
+
+
+def _utc_now(now):
+
+    stamp = _utc_stamp(now)
+
+    if stamp is None:
+        return pd.Timestamp(datetime.now(timezone.utc))
+
+    return stamp
+
+
+def _dates_from(df, column):
+
+    if df is None or df.empty or column not in df.columns:
+        return pd.Series([], dtype="datetime64[ns, UTC]")
+
+    return _utc_series(df[column]).dropna()
+
+
+def _iso_day(stamp):
+
+    return stamp.strftime("%Y-%m-%d")
+
+
+def _week_floor(stamp):
+
+    day = stamp.normalize()
+
+    return day - pd.Timedelta(days=day.weekday())
+
+
+def _month_floor(stamp):
+
+    return pd.Timestamp(year=stamp.year, month=stamp.month, day=1, tz="UTC")
+
+
+def _weekly_table(dates, anchor_start, window_end):
+
+    first = _week_floor(anchor_start)
+    last = _week_floor(window_end)
+    starts = pd.date_range(first, last, freq="7D")
+
+    counts = [0] * len(starts)
+
+    if not dates.empty:
+
+        indexes = ((dates - first).dt.days // 7).astype(int)
+
+        for index in indexes:
+
+            if 0 <= index < len(counts):
+                counts[index] += 1
+
+    table = pd.DataFrame(
+        {
+            "week_start": starts,
+            "commits": counts,
+        }
+    )
+
+    table["complete"] = [
+        bool(start >= anchor_start and start + pd.Timedelta(days=7) <= window_end)
+        for start in starts
+    ]
+
+    table["week_end"] = (table["week_start"] + pd.Timedelta(days=6)).dt.tz_localize(None)
+    table["week_start"] = table["week_start"].dt.tz_localize(None)
+
+    return table[["week_start", "week_end", "commits", "complete"]]
+
+
+def _monthly_commit_table(dates, anchor_start, window_end):
+
+    first = _month_floor(anchor_start)
+    last = _month_floor(window_end)
+    starts = pd.date_range(first, last, freq="MS")
+
+    counts = [0] * len(starts)
+
+    if not dates.empty:
+
+        for stamp in dates:
+
+            index = (stamp.year - first.year) * 12 + stamp.month - first.month
+
+            if 0 <= index < len(counts):
+                counts[index] += 1
+
+    next_starts = [start + pd.offsets.MonthBegin(1) for start in starts]
+
+    return pd.DataFrame(
+        {
+            "month_start": starts,
+            "month_end": [stamp - pd.Timedelta(days=1) for stamp in next_starts],
+            "commits": counts,
+            "complete": [
+                bool(start >= anchor_start and stamp <= window_end)
+                for start, stamp in zip(starts, next_starts)
+            ],
+        }
+    )
+
+
+def _peak_row(table, start_column, end_column):
+
+    if table.empty:
+        return None
+
+    candidates = table[table["complete"] & (table["commits"] > 0)]
+
+    if candidates.empty:
+        return None
+
+    row = candidates.loc[candidates["commits"].idxmax()]
+
+    return {
+        "start": _iso_day(pd.Timestamp(row[start_column])),
+        "end": _iso_day(pd.Timestamp(row[end_column])),
+        "commits": int(row["commits"]),
+    }
+
+
+def _velocity_comparison(current_count, prior_df, prior_fetch_ok, period_start, now, repo_created_at):
+
+    comparison = {
+        "status": "unavailable",
+        "change_pct": None,
+        "change_abs": None,
+        "current_commits": current_count,
+        "prior_commits": None,
+        "prior_start": None,
+        "prior_end": None,
+        "reason": "",
+    }
+
+    if period_start is None:
+
+        comparison["reason"] = VELOCITY_REASON_ALL_TIME
+
+        return comparison
+
+    prior_start = period_start - (now - period_start)
+
+    comparison["prior_start"] = _iso_day(prior_start)
+    comparison["prior_end"] = _iso_day(period_start)
+
+    if not prior_fetch_ok:
+
+        comparison["reason"] = VELOCITY_REASON_FETCH
+
+        return comparison
+
+    prior_dates = _dates_from(prior_df, "date")
+    prior_dates = prior_dates[(prior_dates >= prior_start) & (prior_dates < period_start)]
+
+    created = _utc_stamp(repo_created_at)
+
+    covered = created is not None and (
+        created <= prior_start
+        or (len(prior_dates) > 0 and prior_dates.min() < created)
+    )
+
+    if not covered:
+
+        comparison["reason"] = VELOCITY_REASON_HISTORY
+
+        return comparison
+
+    prior_count = int(len(prior_dates))
+
+    comparison["prior_commits"] = prior_count
+    comparison["change_abs"] = current_count - prior_count
+
+    if prior_count == 0:
+
+        comparison["status"] = "limited"
+        comparison["reason"] = "The previous period had no commits, so a percentage change is undefined."
+
+        return comparison
+
+    if prior_count < VELOCITY_MIN_PRIOR_COMMITS:
+
+        comparison["status"] = "limited"
+        comparison["reason"] = (
+            f"The previous period had only {prior_count} commit(s). "
+            f"At least {VELOCITY_MIN_PRIOR_COMMITS} are needed before a percentage is shown."
+        )
+
+        return comparison
+
+    comparison["status"] = "comparable"
+    comparison["change_pct"] = float((current_count - prior_count) / prior_count * 100.0)
+
+    return comparison
+
+
+def calculate_commit_velocity(
+    current_df,
+    prior_df,
+    period_start,
+    now,
+    repo_created_at,
+    prior_fetch_ok=True,
+):
+
+    now = _utc_now(now)
+    start = _utc_stamp(period_start)
+
+    dates = _dates_from(current_df, "date")
+
+    if start is not None:
+        dates = dates[dates >= start]
+
+    metrics = {
+        "commits": int(len(dates)),
+        "window_days": None,
+        "window_start": None,
+        "window_end": _iso_day(now),
+        "per_day": None,
+        "per_week": None,
+        "per_month": None,
+        "comparison": _velocity_comparison(
+            int(len(dates)),
+            prior_df,
+            prior_fetch_ok,
+            start,
+            now,
+            repo_created_at,
+        ),
+        "peak_week": None,
+        "peak_month": None,
+        "complete_weeks": 0,
+        "total_weeks": 0,
+        "complete_months": 0,
+        "total_months": 0,
+    }
+
+    empty_weekly = pd.DataFrame(
+        {
+            "week_start": pd.Series([], dtype="datetime64[ns]"),
+            "week_end": pd.Series([], dtype="datetime64[ns]"),
+            "commits": pd.Series([], dtype="int64"),
+            "complete": pd.Series([], dtype="bool"),
+        }
+    )
+
+    if start is None:
+
+        if dates.empty:
+            return metrics, empty_weekly
+
+        window_start = dates.min()
+        anchor_week = _week_floor(window_start)
+        anchor_month = _month_floor(window_start)
+
+    else:
+
+        window_start = start
+        anchor_week = start
+        anchor_month = start
+
+    window_end = max(now, dates.max()) if not dates.empty else now
+
+    window_days = max(
+        (now - window_start).total_seconds() / 86400,
+        VELOCITY_MIN_WINDOW_DAYS,
+    )
+
+    metrics["window_days"] = float(window_days)
+    metrics["window_start"] = _iso_day(window_start)
+
+    per_day = len(dates) / window_days
+
+    metrics["per_day"] = float(per_day)
+
+    if window_days >= VELOCITY_MIN_WEEK_DAYS:
+        metrics["per_week"] = float(per_day * 7)
+
+    if window_days >= VELOCITY_MIN_MONTH_DAYS:
+        metrics["per_month"] = float(per_day * DAYS_PER_MONTH)
+
+    weekly = _weekly_table(dates, anchor_week, window_end)
+    monthly = _monthly_commit_table(dates, anchor_month, window_end)
+
+    metrics["total_weeks"] = int(len(weekly))
+    metrics["complete_weeks"] = int(weekly["complete"].sum())
+    metrics["total_months"] = int(len(monthly))
+    metrics["complete_months"] = int(monthly["complete"].sum())
+
+    metrics["peak_week"] = _peak_row(weekly, "week_start", "week_end")
+    metrics["peak_month"] = _peak_row(monthly, "month_start", "month_end")
+
+    return metrics, weekly.reset_index(drop=True)
+
+
+def _age_distribution(ages_days, limits):
+
+    labels = []
+    previous = None
+
+    for limit in limits:
+
+        if previous is None:
+            labels.append(f"Up to {limit} days")
+        else:
+            labels.append(f"{previous}-{limit} days")
+
+        previous = limit
+
+    labels.append(f"Over {previous} days")
+
+    counts = [0] * len(labels)
+
+    for age in ages_days:
+
+        slot = len(limits)
+
+        for position, limit in enumerate(limits):
+
+            if age <= limit:
+                slot = position
+                break
+
+        counts[slot] += 1
+
+    total = sum(counts)
+
+    return pd.DataFrame(
+        {
+            "age_band": labels,
+            "count": counts,
+            "share": [
+                (count / total * 100.0) if total > 0 else 0.0
+                for count in counts
+            ],
+        }
+    )
+
+
+def _monthly_counts_table(series_by_column):
+
+    names = list(series_by_column.keys())
+    counts = {}
+
+    for name, dates in series_by_column.items():
+
+        if dates.empty:
+            counts[name] = pd.Series([], dtype="int64")
+            continue
+
+        periods = dates.dt.tz_convert("UTC").dt.tz_localize(None).dt.to_period("M")
+        counts[name] = periods.value_counts()
+
+    all_periods = [period for series in counts.values() for period in series.index]
+
+    if not all_periods:
+        return pd.DataFrame(columns=["month"] + names)
+
+    full = pd.period_range(min(all_periods), max(all_periods), freq="M")
+
+    frame = pd.DataFrame({"month": [str(period) for period in full]})
+
+    for name in names:
+        frame[name] = [int(counts[name].get(period, 0)) for period in full]
+
+    return frame
+
+
+def _oldest_open(frame, created, ages):
+
+    if ages.empty:
+        return None
+
+    index = ages.idxmax()
+    row = frame.loc[index]
+
+    return {
+        "number": int(row["number"]) if pd.notna(row.get("number")) else None,
+        "title": str(row.get("title") or ""),
+        "age_days": float(ages.loc[index]),
+        "created_at": _iso_day(created.loc[index]),
+    }
+
+
+def _duration_summary(durations):
+
+    if durations.empty:
+        return None, None
+
+    return float(durations.mean()), float(durations.median())
+
+
+def calculate_issue_resolution(df, now=None):
+
+    now = _utc_now(now)
+
+    metrics = {
+        "closed_with_duration": 0,
+        "average_days_to_close": None,
+        "median_days_to_close": None,
+        "open_count": 0,
+        "oldest_open": None,
+        "stale_open_count": 0,
+        "stale_open_share": None,
+    }
+
+    empty_aging = _age_distribution([], ISSUE_AGE_LIMITS)
+    empty_monthly = pd.DataFrame(columns=["month", "opened", "closed"])
+
+    if (
+        df is None
+        or df.empty
+        or "created_at" not in df.columns
+        or "state" not in df.columns
+    ):
+        return metrics, empty_aging, empty_monthly
+
+    created = _utc_series(df["created_at"])
+    closed_at = (
+        _utc_series(df["closed_at"])
+        if "closed_at" in df.columns
+        else pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns, UTC]")
+    )
+
+    closed_mask = df["state"].eq("closed") & closed_at.notna() & created.notna()
+    durations = (closed_at - created)[closed_mask].dt.total_seconds() / 86400
+    durations = durations[durations >= 0]
+
+    metrics["closed_with_duration"] = int(len(durations))
+    metrics["average_days_to_close"], metrics["median_days_to_close"] = _duration_summary(durations)
+
+    open_mask = df["state"].eq("open") & created.notna()
+    ages = ((now - created[open_mask]).dt.total_seconds() / 86400).clip(lower=0)
+
+    metrics["open_count"] = int(len(ages))
+    metrics["oldest_open"] = _oldest_open(df, created, ages)
+    metrics["stale_open_count"] = int((ages > STALE_ISSUE_DAYS).sum())
+
+    if len(ages) > 0:
+        metrics["stale_open_share"] = float(metrics["stale_open_count"] / len(ages) * 100.0)
+
+    aging = _age_distribution(list(ages), ISSUE_AGE_LIMITS)
+
+    monthly = _monthly_counts_table(
+        {
+            "opened": created.dropna(),
+            "closed": closed_at[closed_mask],
+        }
+    )
+
+    return metrics, aging, monthly
+
+
+def calculate_pull_request_health(df, now=None):
+
+    now = _utc_now(now)
+
+    metrics = {
+        "closed_count": 0,
+        "closed_unmerged_count": 0,
+        "closed_unmerged_share": None,
+        "merged_with_duration": 0,
+        "average_days_to_merge": None,
+        "median_days_to_merge": None,
+        "open_count": 0,
+        "oldest_open": None,
+        "stale_open_count": 0,
+        "stale_open_share": None,
+    }
+
+    empty_aging = _age_distribution([], PR_AGE_LIMITS)
+    empty_monthly = pd.DataFrame(columns=["month", "opened", "merged", "closed_unmerged"])
+
+    if (
+        df is None
+        or df.empty
+        or "created_at" not in df.columns
+        or "state" not in df.columns
+    ):
+        return metrics, empty_aging, empty_monthly
+
+    created = _utc_series(df["created_at"])
+    blank = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns, UTC]")
+    merged_at = _utc_series(df["merged_at"]) if "merged_at" in df.columns else blank
+    closed_at = _utc_series(df["closed_at"]) if "closed_at" in df.columns else blank
+
+    closed_mask = df["state"].eq("closed")
+    unmerged_mask = closed_mask & merged_at.isna()
+    merged_mask = merged_at.notna() & created.notna()
+
+    metrics["closed_count"] = int(closed_mask.sum())
+    metrics["closed_unmerged_count"] = int(unmerged_mask.sum())
+
+    if metrics["closed_count"] > 0:
+        metrics["closed_unmerged_share"] = float(
+            metrics["closed_unmerged_count"] / metrics["closed_count"] * 100.0
+        )
+
+    durations = (merged_at - created)[merged_mask].dt.total_seconds() / 86400
+    durations = durations[durations >= 0]
+
+    metrics["merged_with_duration"] = int(len(durations))
+    metrics["average_days_to_merge"], metrics["median_days_to_merge"] = _duration_summary(durations)
+
+    open_mask = df["state"].eq("open") & created.notna()
+    ages = ((now - created[open_mask]).dt.total_seconds() / 86400).clip(lower=0)
+
+    metrics["open_count"] = int(len(ages))
+    metrics["oldest_open"] = _oldest_open(df, created, ages)
+    metrics["stale_open_count"] = int((ages > STALE_PR_DAYS).sum())
+
+    if len(ages) > 0:
+        metrics["stale_open_share"] = float(metrics["stale_open_count"] / len(ages) * 100.0)
+
+    aging = _age_distribution(list(ages), PR_AGE_LIMITS)
+
+    monthly = _monthly_counts_table(
+        {
+            "opened": created.dropna(),
+            "merged": merged_at[merged_mask],
+            "closed_unmerged": closed_at[unmerged_mask].dropna(),
+        }
+    )
+
+    return metrics, aging, monthly
+
+
+def release_cadence_label(median_days):
+
+    if median_days is None:
+        return None
+
+    for limit, label in RELEASE_CADENCE_BANDS:
+
+        if median_days <= limit:
+            return label
+
+    return RELEASE_CADENCE_FALLBACK
+
+
+def calculate_release_cadence(df, now=None):
+
+    now = _utc_now(now)
+
+    metrics = {
+        "published_count": 0,
+        "latest_tag": None,
+        "latest_age_days": None,
+        "median_interval_days": None,
+        "shortest_interval_days": None,
+        "longest_interval_days": None,
+        "cadence_label": None,
+        "cadence_reason": "No published releases were found in the selected window.",
+    }
+
+    empty_intervals = pd.DataFrame(columns=["tag", "published_at", "days_since_previous"])
+
+    if (
+        df is None
+        or df.empty
+        or "published_at" not in df.columns
+        or "tag" not in df.columns
+    ):
+        return metrics, empty_intervals
+
+    published = df.assign(published_at=_utc_series(df["published_at"]))
+    published = published[published["published_at"].notna()]
+    published = published.sort_values("published_at", kind="stable").reset_index(drop=True)
+
+    if published.empty:
+        return metrics, empty_intervals
+
+    metrics["published_count"] = int(len(published))
+    metrics["latest_tag"] = str(published.iloc[-1]["tag"])
+    metrics["latest_age_days"] = float(
+        max(0.0, (now - published.iloc[-1]["published_at"]).total_seconds() / 86400)
+    )
+
+    gaps = published["published_at"].diff().dt.total_seconds() / 86400
+
+    intervals = pd.DataFrame(
+        {
+            "tag": published["tag"].astype(str),
+            "published_at": published["published_at"],
+            "days_since_previous": gaps,
+        }
+    ).iloc[1:].reset_index(drop=True)
+
+    if intervals.empty:
+
+        metrics["cadence_reason"] = (
+            f"At least {RELEASE_CADENCE_MIN_RELEASES} published releases are needed to label a cadence."
+        )
+
+        return metrics, intervals
+
+    metrics["median_interval_days"] = float(intervals["days_since_previous"].median())
+    metrics["shortest_interval_days"] = float(intervals["days_since_previous"].min())
+    metrics["longest_interval_days"] = float(intervals["days_since_previous"].max())
+
+    if metrics["published_count"] >= RELEASE_CADENCE_MIN_RELEASES:
+
+        metrics["cadence_label"] = release_cadence_label(metrics["median_interval_days"])
+        metrics["cadence_reason"] = ""
+
+    else:
+
+        metrics["cadence_reason"] = (
+            f"At least {RELEASE_CADENCE_MIN_RELEASES} published releases are needed to label a cadence."
+        )
+
+    return metrics, intervals
+
+
+def _describe_cadence_bands():
+
+    parts = []
+    previous = None
+
+    for limit, label in RELEASE_CADENCE_BANDS:
+
+        if previous is None:
+            parts.append(f"up to {limit} days: {label}")
+        else:
+            parts.append(f"over {previous} to {limit} days: {label}")
+
+        previous = limit
+
+    parts.append(f"over {previous} days: {RELEASE_CADENCE_FALLBACK}")
+
+    return "; ".join(parts)
+
+
+def _describe_age_limits(limits):
+
+    parts = []
+    previous = None
+
+    for limit in limits:
+
+        parts.append(f"up to {limit} days" if previous is None else f"{previous}-{limit} days")
+        previous = limit
+
+    parts.append(f"over {previous} days")
+
+    return ", ".join(parts)
+
+
+VELOCITY_METHODS = [
+    {
+        "name": "Commit rates",
+        "summary": "Commits per day, week and month over the analysis window.",
+        "rules": [
+            ("Per day", "Commits in the window divided by the window length in days. Windows shorter than 1 day count as 1 day. For All Time the window runs from the first commit to now."),
+            ("Per week", f"Per-day rate multiplied by 7. Shown only when the window is at least {VELOCITY_MIN_WEEK_DAYS} days."),
+            ("Per month", f"Per-day rate multiplied by {DAYS_PER_MONTH:.2f} days. Shown only when the window is at least {VELOCITY_MIN_MONTH_DAYS} days."),
+            ("Difference from Avg Commits / Day", "The Commit Analysis card divides by the span between the first and last commit. Velocity divides by the whole window, so quiet recent stretches lower the rate."),
+        ],
+    },
+    {
+        "name": "Change vs previous period",
+        "summary": "Compares the window with an equally long window that ends where it begins.",
+        "rules": [
+            ("Previous period", "Same length as the selected window, ending at the moment the selected window starts. A commit exactly at that moment counts only in the selected window."),
+            ("Percentage", f"(current - previous) / previous x 100. Shown only when the previous period has at least {VELOCITY_MIN_PRIOR_COMMITS} commits."),
+            ("Repository history", "Shown only when the repository existed for the whole previous period. Otherwise the card explains why it is not shown."),
+            ("All Time", "Has no previous period, so no change is shown."),
+        ],
+    },
+    {
+        "name": "Peak week and peak month",
+        "summary": "The busiest complete week and month in the window.",
+        "rules": [
+            ("Weeks", "Monday to Sunday in UTC, based on the commit author date. Weeks with no commits count as 0."),
+            ("Months", "Calendar months in UTC. Months with no commits count as 0."),
+            ("Complete only", "A week or month is complete when it lies fully inside the window. Partial ones are drawn lighter in the chart and never chosen as the peak. For All Time the first week and month count as complete because no history precedes them."),
+            ("Ties", "The earliest period wins."),
+        ],
+    },
+]
+
+VELOCITY_FOOT = (
+    "Commit velocity describes how much commit activity was recorded. It does not measure code quality or effort, "
+    "and a higher number is not automatically better."
+)
+
+ISSUE_RESOLUTION_METHODS = [
+    {
+        "name": "Time to close",
+        "summary": "How long closed issues stayed open.",
+        "rules": [
+            ("Included issues", "Issues created in the selected window that are now closed and have a closing date. Issues still open are not included, so the figures can understate how long issues really take."),
+            ("Average and median", "Mean and median of closing date minus creation date. The median is less affected by a few very long-lived issues."),
+        ],
+    },
+    {
+        "name": "Oldest open and aging",
+        "summary": "How long open issues have been waiting.",
+        "rules": [
+            ("Age", "Now minus creation date for issues that are currently open."),
+            ("Age bands", f"An issue falls in the first band whose upper limit its age does not exceed: {_describe_age_limits(ISSUE_AGE_LIMITS)}."),
+            ("Stale", f"Open issues older than {STALE_ISSUE_DAYS} days, the same threshold used by the health score."),
+        ],
+    },
+    {
+        "name": "Issues by month",
+        "summary": "Issues opened and closed per calendar month.",
+        "rules": [
+            ("Opened", "Issues created in that month (UTC)."),
+            ("Closed", "Issues from the selected window that were closed in that month. Issues created before the window are not counted."),
+        ],
+    },
+]
+
+PR_HEALTH_METHODS = [
+    {
+        "name": "Closed without merge",
+        "summary": "Pull requests that were closed but never merged.",
+        "rules": [
+            ("Count", "Closed pull requests with no merge date."),
+            ("Share", "Closed without merge divided by all closed pull requests in the window."),
+        ],
+    },
+    {
+        "name": "Time to merge",
+        "summary": "How long merged pull requests took to merge.",
+        "rules": [
+            ("Included pull requests", "Pull requests created in the selected window that have been merged. Open ones are not included, so the figures can understate real waiting times."),
+            ("Average and median", "Mean and median of merge date minus creation date."),
+        ],
+    },
+    {
+        "name": "Open pull request aging",
+        "summary": "How long open pull requests have been waiting.",
+        "rules": [
+            ("Age bands", f"Now minus creation date, placed in the first band whose upper limit it does not exceed: {_describe_age_limits(PR_AGE_LIMITS)}."),
+            ("Stale", f"Open pull requests older than {STALE_PR_DAYS} days, the same threshold used by the health score."),
+        ],
+    },
+    {
+        "name": "Pull requests per month",
+        "summary": "Pull requests opened, merged and closed without merge per calendar month.",
+        "rules": [
+            ("Opened", "Pull requests created in that month (UTC)."),
+            ("Merged and closed without merge", "Pull requests from the selected window merged or closed in that month. Those created before the window are not counted."),
+        ],
+    },
+]
+
+RELEASE_CADENCE_METHODS = [
+    {
+        "name": "Release interval",
+        "summary": "Days between consecutive published releases.",
+        "rules": [
+            ("Included releases", "Published releases (including pre-releases, excluding drafts) inside the selected window. Releases before the window are not used."),
+            ("Median", "Median of the gaps between consecutive release dates. It is not pulled up by one long pause."),
+            ("Shortest and longest", "Smallest and largest of those gaps."),
+        ],
+    },
+    {
+        "name": "Cadence label",
+        "summary": "A plain-language label for the median interval.",
+        "rules": [
+            ("Bands", _describe_cadence_bands()),
+            ("Minimum data", f"At least {RELEASE_CADENCE_MIN_RELEASES} published releases in the window. With fewer, no label is given."),
+        ],
+    },
+    {
+        "name": "Latest release age",
+        "summary": "Days from the latest published release in the window to now.",
+        "rules": [
+            ("Window", "If no release was published in the window, the age is not shown even when older releases exist."),
+        ],
+    },
+]
+
+ISSUE_RESOLUTION_FOOT = (
+    "Issues are selected by creation date, so closing times describe issues created in the window that have since been closed. "
+    "Nothing here judges whether a resolution time is good or bad."
+)
+
+PR_HEALTH_FOOT = (
+    "Pull requests are selected by creation date, so merge times describe pull requests created in the window that have since been merged. "
+    "Nothing here judges whether a merge time is good or bad."
+)
+
+RELEASE_CADENCE_FOOT = (
+    "Cadence describes how regularly releases were published inside the window. "
+    "It does not measure release quality, and repositories that do not use GitHub releases will show little or nothing here."
+)

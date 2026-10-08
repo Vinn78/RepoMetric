@@ -24,6 +24,10 @@ from data_processor import (
     calculate_contributor_concentration,
     calculate_release_metrics,
     calculate_health_score,
+    calculate_commit_velocity,
+    calculate_issue_resolution,
+    calculate_pull_request_health,
+    calculate_release_cadence,
 )
 
                                                               
@@ -748,6 +752,8 @@ def fetch_selected_datasets(
     releases_required=False,
     since=None,
     until=None,
+    prior_commits_required=False,
+    prior_since=None,
 ):
     """
     Fetch independent GitHub datasets concurrently.
@@ -764,6 +770,18 @@ def fetch_selected_datasets(
         tasks["commits"] = lambda: get_commits(
             owner, repo, since=since, until=until
         )
+
+    if prior_commits_required:
+
+        def fetch_prior_commits():
+            try:
+                return get_commits(
+                    owner, repo, since=prior_since, until=since
+                )
+            except Exception:
+                return None
+
+        tasks["prior_commits"] = fetch_prior_commits
 
     if contributors_required:
         tasks["contributors"] = lambda: get_contributors(
@@ -790,6 +808,7 @@ def fetch_selected_datasets(
 
     results = {
         "commits": [],
+        "prior_commits": [],
         "contributors": [],
         "issues": [],
         "pull_requests": [],
@@ -922,6 +941,17 @@ def analyze_repository(
 
     releases_required = "Releases" in selected_analyses
 
+    prior_commits_required = (
+        "Commits" in selected_analyses
+        and since is not None
+    )
+
+    prior_since = (
+        since - (until - since)
+        if prior_commits_required
+        else None
+    )
+
                                                               
                                            
                                                               
@@ -937,9 +967,12 @@ def analyze_repository(
         releases_required=releases_required,
         since=since,
         until=until,
+        prior_commits_required=prior_commits_required,
+        prior_since=prior_since,
     )
 
     commits = datasets["commits"]
+    prior_commits = datasets["prior_commits"]
     contributors = datasets["contributors"]
     issues = datasets["issues"]
     pull_requests = datasets["pull_requests"]
@@ -1091,6 +1124,60 @@ def analyze_repository(
     else:
         release_metrics = empty_metric_dict()
 
+    if "Commits" in selected_analyses:
+        commit_velocity, commit_velocity_weekly = (
+            calculate_commit_velocity(
+                commits_df,
+                (
+                    commits_to_dataframe(prior_commits)
+                    if prior_commits
+                    else empty_dataframe()
+                ),
+                since,
+                until,
+                repository.get("created_at"),
+                prior_fetch_ok=prior_commits is not None,
+            )
+        )
+    else:
+        commit_velocity = empty_metric_dict()
+        commit_velocity_weekly = empty_dataframe()
+
+    if "Issues" in selected_analyses:
+        issue_resolution, issue_aging, issue_monthly = (
+            calculate_issue_resolution(
+                issues_df,
+                until,
+            )
+        )
+    else:
+        issue_resolution = empty_metric_dict()
+        issue_aging = empty_dataframe()
+        issue_monthly = empty_dataframe()
+
+    if "Pull Requests" in selected_analyses:
+        pull_request_health, pull_request_aging, pull_request_monthly = (
+            calculate_pull_request_health(
+                pull_requests_df,
+                until,
+            )
+        )
+    else:
+        pull_request_health = empty_metric_dict()
+        pull_request_aging = empty_dataframe()
+        pull_request_monthly = empty_dataframe()
+
+    if "Releases" in selected_analyses:
+        release_cadence, release_intervals = (
+            calculate_release_cadence(
+                releases_df,
+                until,
+            )
+        )
+    else:
+        release_cadence = empty_metric_dict()
+        release_intervals = empty_dataframe()
+
     health_score = calculate_health_score(
         commits_df,
         contributors_df,
@@ -1129,6 +1216,20 @@ def analyze_repository(
         "pull_request_metrics": pull_request_metrics,
 
         "release_metrics": release_metrics,
+
+        "commit_velocity": commit_velocity,
+        "commit_velocity_weekly": commit_velocity_weekly,
+
+        "issue_resolution": issue_resolution,
+        "issue_aging": issue_aging,
+        "issue_monthly": issue_monthly,
+
+        "pull_request_health": pull_request_health,
+        "pull_request_aging": pull_request_aging,
+        "pull_request_monthly": pull_request_monthly,
+
+        "release_cadence": release_cadence,
+        "release_intervals": release_intervals,
 
         "health_score": health_score,
     }
