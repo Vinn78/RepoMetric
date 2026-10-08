@@ -28,6 +28,8 @@ from data_processor import (
     calculate_contributor_concentration,
     calculate_release_metrics,
     calculate_health_score,
+    calculate_trend_detection,
+    build_contributor_leaderboard,
     calculate_commit_velocity,
     calculate_issue_resolution,
     calculate_pull_request_health,
@@ -1745,6 +1747,26 @@ def _analyze_uncached(
         now=until,
     )
 
+    contributor_leaderboard = (
+        build_contributor_leaderboard(
+            contributors_df,
+            commits_df,
+            period_start=since,
+            now=until,
+        )
+        if "Contributors" in selected_analyses
+        else contributors_df
+    )
+
+    trend_detection = calculate_trend_detection(
+        commits_df,
+        issues_df,
+        pull_requests_df,
+        selected_analyses,
+        period_start=since,
+        now=until,
+    )
+
     _stage_finish("metrics", True)
 
     return {
@@ -1756,6 +1778,7 @@ def _analyze_uncached(
 
         "commits": commits_df,
         "contributors": contributors_df,
+        "contributor_leaderboard": contributor_leaderboard,
         "issues": issues_df,
         "pull_requests": pull_requests_df,
         "languages": languages_df,
@@ -1792,6 +1815,7 @@ def _analyze_uncached(
         "release_intervals": release_intervals,
 
         "health_score": health_score,
+        "trend_detection": trend_detection,
     }
 
 

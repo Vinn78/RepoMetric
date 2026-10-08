@@ -2092,6 +2092,7 @@ EXPORT_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 EXPORT_ILLEGAL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 EXCEL_MAX_DATA_ROWS = 1048575
 TABLE_SEARCH_MIN_ROWS = 10
+TABLE_FILTER_MAX_OPTIONS = 200
 EXCEL_SHEET_NAME_LIMIT = 31
 EXCEL_SHEET_NAME_FORBIDDEN = re.compile(r"[\\/*?:\[\]]")
 
@@ -2103,6 +2104,9 @@ TABLE_TOOLS_METHODS = [
             ("Where it appears", f"Search and filters are offered on tables with at least {TABLE_SEARCH_MIN_ROWS} rows. Every table can be exported."),
             ("Search", "Case-insensitive plain-text match, not a pattern. A row is kept when any text column, or the number column of issues and pull requests, contains the text."),
             ("Filters", "Choosing values in a filter keeps only rows with one of those values. Leaving a filter empty applies no filter. Search and filters combine."),
+            ("Author and status", "Issues and pull requests can be filtered by author and state, and pull requests also by whether they were merged, closed without merging, or are still open. The author list shows the most active authors."),
+            ("Date range", "Commits are filtered by commit date, issues by the date they were opened and pull requests by the date they were opened. Both ends of the range are included. A range only applies once both dates are chosen."),
+            ("Labels", "Issue labels are not fetched from GitHub, so there is no label filter."),
             ("Scope", "Filtering only changes what is shown and exported. The charts, KPIs and scores above are always calculated from the full data."),
         ],
     },
@@ -2110,7 +2114,7 @@ TABLE_TOOLS_METHODS = [
         "name": "Exports",
         "summary": "CSV and Excel files contain exactly the rows currently shown in that table.",
         "rules": [
-            ("Workbook", "The workbook holds every table from the analysis, unfiltered, one sheet per table."),
+            ("Workbook", "The workbook holds a Summary metrics sheet with every calculated headline figure, followed by every table from the analysis, unfiltered, one sheet per table."),
             ("Dates", "Dates are written in UTC without a time zone label, because Excel cannot store time zones."),
             ("Text safety", "GitHub titles and messages are untrusted. Text starting with =, +, - or @ gets a leading apostrophe so spreadsheet programs do not run it as a formula, and control characters are removed."),
             ("Size limit", f"An Excel sheet holds at most {EXCEL_MAX_DATA_ROWS:,} data rows. Larger tables are cut at that limit and the workbook says which ones."),
@@ -2132,12 +2136,19 @@ def _is_text_column(series):
     )
 
 
-def filter_table(df, query="", column_values=None):
+def filter_table(df, query="", column_values=None, date_column=None, date_range=None):
 
     if df is None or df.empty:
         return df
 
     result = df
+
+    if date_column and date_range and date_column in result.columns:
+
+        stamps = pd.to_datetime(result[date_column], utc=True, errors="coerce")
+        first = pd.Timestamp(date_range[0], tz="UTC")
+        last = pd.Timestamp(date_range[1], tz="UTC") + pd.Timedelta(days=1)
+        result = result[(stamps >= first) & (stamps < last)]
 
     for column, wanted in (column_values or {}).items():
 
@@ -2717,3 +2728,436 @@ COMPARISON_FOOT = (
     "A comparison shows how two repositories differ on recorded activity. It does not rank their quality, "
     "and differences in size, age or workflow can explain many of the gaps."
 )
+
+
+TREND_STABLE_BAND = 0.15
+TREND_MIN_EVENTS = 6
+TREND_ARROWS = {
+    "Increasing": "\u2191",
+    "Stable": "\u2192",
+    "Declining": "\u2193",
+    "Not enough data": "\u2013",
+}
+TREND_SERIES = [
+    ("commits", "Commits", "Commit activity", "commits", "date"),
+    ("issues", "Issues", "Issue activity", "issues opened", "created_at"),
+    ("pull_requests", "Pull Requests", "PR activity", "pull requests opened", "created_at"),
+]
+LEADERBOARD_MIN_DATA_NOTE = "Not available"
+
+
+def classify_trend(earlier, later):
+
+    earlier = int(earlier)
+    later = int(later)
+    total = earlier + later
+
+    result = {
+        "label": "Not enough data",
+        "arrow": TREND_ARROWS["Not enough data"],
+        "change": None,
+        "earlier": earlier,
+        "later": later,
+    }
+
+    if total < TREND_MIN_EVENTS:
+        return result
+
+    if earlier == 0:
+        result["label"] = "Increasing"
+        result["arrow"] = TREND_ARROWS["Increasing"]
+        return result
+
+    change = (later - earlier) / earlier
+    result["change"] = change * 100.0
+
+    if change > TREND_STABLE_BAND:
+        label = "Increasing"
+    elif change < -TREND_STABLE_BAND:
+        label = "Declining"
+    else:
+        label = "Stable"
+
+    result["label"] = label
+    result["arrow"] = TREND_ARROWS[label]
+
+    return result
+
+
+def _trend_bounds(date_series, period_start, now):
+
+    end = _utc_now(now)
+    start = _utc_stamp(period_start)
+
+    if start is None:
+
+        starts = [series.min() for series in date_series if len(series)]
+
+        if not starts:
+            return None, end, None
+
+        start = min(starts)
+
+    if end <= start:
+        return None, end, None
+
+    return start, end, start + (end - start) / 2
+
+
+def _half_counts(dates, start, mid, end):
+
+    if dates is None or len(dates) == 0:
+        return 0, 0
+
+    inside = dates[(dates >= start) & (dates <= end)]
+
+    return int((inside < mid).sum()), int((inside >= mid).sum())
+
+
+def _trend_sentence(name, unit, result):
+
+    earlier = result["earlier"]
+    later = result["later"]
+
+    if result["label"] == "Not enough data":
+        return (
+            f"{name}: only {earlier + later:,} {unit} in the window, "
+            f"and at least {TREND_MIN_EVENTS} are needed to classify a trend."
+        )
+
+    if result["change"] is None:
+        return f"{name} rose from none in the earlier half to {later:,} {unit} in the later half."
+
+    magnitude = abs(result["change"])
+
+    if result["label"] == "Stable":
+        return (
+            f"{name} was stable: {later:,} {unit} in the later half against "
+            f"{earlier:,} in the earlier half ({result['change']:+.0f}%)."
+        )
+
+    verb = "increased" if result["label"] == "Increasing" else "declined"
+
+    return (
+        f"{name} {verb} {magnitude:.0f}%: {later:,} {unit} in the later half "
+        f"against {earlier:,} in the earlier half."
+    )
+
+
+def calculate_trend_detection(
+    commits_df,
+    issues_df,
+    pull_requests_df,
+    selected_analyses,
+    period_start=None,
+    now=None,
+):
+
+    selected = set(selected_analyses or [])
+    frames = {
+        "commits": commits_df,
+        "issues": issues_df,
+        "pull_requests": pull_requests_df,
+    }
+
+    dates = {
+        key: _dates_from(frames[key], column)
+        for key, required, _, _, column in TREND_SERIES
+        if required in selected
+    }
+
+    start, end, mid = _trend_bounds(list(dates.values()), period_start, now)
+    rows = []
+
+    for key, required, name, unit, _ in TREND_SERIES:
+
+        if required not in selected:
+            continue
+
+        if start is None:
+            result = classify_trend(0, 0)
+        else:
+            result = classify_trend(*_half_counts(dates[key], start, mid, end))
+
+        rows.append({
+            "key": key,
+            "name": name,
+            "unit": unit,
+            "label": result["label"],
+            "arrow": result["arrow"],
+            "change": result["change"],
+            "earlier": result["earlier"],
+            "later": result["later"],
+            "sentence": _trend_sentence(name, unit, result),
+        })
+
+    return {
+        "rows": rows,
+        "window_start": start,
+        "midpoint": mid,
+        "window_end": end,
+    }
+
+
+TREND_METHODS = [
+    {
+        "name": "How a trend is classified",
+        "summary": "The analysis window is split into two equal halves and the same events are counted in each.",
+        "rules": [
+            ("Window", "The selected period, ending now. For All Time it runs from the earliest commit, issue or pull request that was fetched."),
+            ("Events", "Commits are counted by commit date. Issues and pull requests are counted by the date they were opened."),
+            ("Change", "Events in the later half minus events in the earlier half, divided by events in the earlier half."),
+            ("Labels", f"Increasing when the change is above +{TREND_STABLE_BAND * 100:.0f}%, Declining when it is below -{TREND_STABLE_BAND * 100:.0f}%, and Stable in between."),
+            ("Not enough data", f"Fewer than {TREND_MIN_EVENTS} events across both halves are not classified. If the earlier half has none, the trend is Increasing and no percentage is shown."),
+        ],
+    },
+]
+
+TREND_FOOT = (
+    "Halves are compared on counts only, so a trend describes direction inside this window, not a forecast. "
+    "A very long window can hide recent changes."
+)
+
+
+LEADERBOARD_METHODS = [
+    {
+        "name": "How the leaderboard is built",
+        "summary": "Contribution counts and shares come from the contributor data. The remaining columns are measured from the fetched commits.",
+        "rules": [
+            ("Rank", "Position by contributions, highest first."),
+            ("Share", "A contributor's contributions as a percentage of all measured contributions."),
+            ("Active days", "Distinct UTC days on which the contributor has a fetched commit."),
+            ("First and last", "Dates of the earliest and latest fetched commit by that contributor."),
+            ("Activity trend", f"The same half-versus-half comparison used for repository trends, applied to the contributor's commits. At least {TREND_MIN_EVENTS} commits are needed."),
+            ("Matching", "Commits are matched to contributors by name, ignoring case. When contributors come from GitHub's all-time list they are identified by username, so a commit author with a different display name will not match and those columns stay empty."),
+        ],
+    },
+]
+
+LEADERBOARD_FOOT = (
+    "Commit-based columns only cover commits that were fetched for this analysis, "
+    "so they can be empty when the Commits analysis was not selected."
+)
+
+
+def build_contributor_leaderboard(contributors_df, commits_df, period_start=None, now=None):
+
+    if contributors_df is None or contributors_df.empty:
+        return contributors_df
+
+    board = contributors_df.copy().reset_index(drop=True)
+    board.insert(0, "rank", range(1, len(board) + 1))
+
+    commit_dates = _dates_from(commits_df, "date")
+    start, end, mid = _trend_bounds([commit_dates], period_start, now)
+
+    by_author = {}
+
+    if (
+        commits_df is not None
+        and not commits_df.empty
+        and "author" in commits_df.columns
+        and "date" in commits_df.columns
+    ):
+
+        frame = pd.DataFrame({
+            "author": commits_df["author"].fillna("Unknown").astype(str).str.casefold(),
+            "date": _utc_series(commits_df["date"]),
+        }).dropna(subset=["date"])
+
+        by_author = {name: group["date"] for name, group in frame.groupby("author")}
+
+    active_days = []
+    first_dates = []
+    last_dates = []
+    trends = []
+
+    for username in board["username"]:
+
+        dates = by_author.get(str(username).casefold())
+
+        if dates is None or dates.empty:
+            active_days.append(None)
+            first_dates.append(pd.NaT)
+            last_dates.append(pd.NaT)
+            trends.append(LEADERBOARD_MIN_DATA_NOTE)
+            continue
+
+        active_days.append(int(dates.dt.strftime("%Y-%m-%d").nunique()))
+        first_dates.append(dates.min())
+        last_dates.append(dates.max())
+
+        if start is None:
+            trends.append(TREND_ARROWS["Not enough data"] + " Not enough data")
+            continue
+
+        result = classify_trend(*_half_counts(dates, start, mid, end))
+        trends.append(f"{result['arrow']} {result['label']}")
+
+    board["active_days"] = pd.array(active_days, dtype="Int64")
+    board["first_contribution"] = pd.to_datetime(first_dates, utc=True)
+    board["last_contribution"] = pd.to_datetime(last_dates, utc=True)
+    board["activity_trend"] = trends
+
+    return board
+
+
+SNAPSHOT_AREAS = [
+    ("activity", "Activity", ("High", "Medium", "Low")),
+    ("collaboration", "Collaboration", ("High", "Medium", "Low")),
+    ("issues", "Issue Health", ("Good", "Fair", "Poor")),
+    ("pull_requests", "PR Health", ("Good", "Fair", "Poor")),
+    ("releases", "Maintenance", ("High", "Medium", "Low")),
+]
+
+SNAPSHOT_HIGH_SCORE = 75
+SNAPSHOT_MEDIUM_SCORE = 50
+
+
+def calculate_snapshot_areas(health_score):
+
+    components = {
+        item["key"]: item
+        for item in ((health_score or {}).get("components") or [])
+    }
+
+    rows = []
+
+    for key, name, words in SNAPSHOT_AREAS:
+
+        component = components.get(key)
+        score = component["score"] if component and component["available"] else None
+
+        if score is None:
+            label = "N/A"
+            reason = (component or {}).get("reason") or "Not enough data to rate this area."
+        else:
+            reason = None
+            if score >= SNAPSHOT_HIGH_SCORE:
+                label = words[0]
+            elif score >= SNAPSHOT_MEDIUM_SCORE:
+                label = words[1]
+            else:
+                label = words[2]
+
+        rows.append({
+            "key": key,
+            "name": name,
+            "score": None if score is None else int(round(score)),
+            "label": label,
+            "reason": reason,
+        })
+
+    return rows
+
+
+SNAPSHOT_METHODS = [
+    {
+        "name": "How area ratings are assigned",
+        "summary": "Each rating is the score of one health-score component, turned into a word.",
+        "rules": [
+            ("Scores", "Activity, Collaboration, Issue Health, PR Health and Maintenance are the Activity, Collaboration, Issues, PR Health and Releases components of the repository health score. Maintenance is the Releases component."),
+            ("Bands", f"A score of {SNAPSHOT_HIGH_SCORE} or more is High (Good for issues and pull requests), {SNAPSHOT_MEDIUM_SCORE} to {SNAPSHOT_HIGH_SCORE - 1} is Medium (Fair), and below {SNAPSHOT_MEDIUM_SCORE} is Low (Poor)."),
+            ("Unavailable", "An area shows N/A when its analysis was not selected or the data needed to score it is missing. No value is estimated."),
+        ],
+    },
+]
+
+SNAPSHOT_FOOT = "The overall health score and its components are explained in the health score section."
+
+
+SUMMARY_SECTIONS = [
+    ("Commits", "Commits", ["commit_metrics", "commit_activity_trend", "commit_velocity", "commit_heatmap"]),
+    ("Contributors", "Contributors", ["contributor_metrics", "contributor_concentration"]),
+    ("Issues", "Issues", ["issue_metrics", "issue_resolution"]),
+    ("Pull requests", "Pull Requests", ["pull_request_metrics", "pull_request_health"]),
+    ("Releases", "Releases", ["release_metrics", "release_cadence"]),
+]
+
+SUMMARY_REPOSITORY_FIELDS = [
+    ("full_name", "Repository"),
+    ("stargazers_count", "Stars"),
+    ("forks_count", "Forks"),
+    ("open_issues_count", "Open issues and pull requests"),
+    ("language", "Primary language"),
+    ("created_at", "Created"),
+    ("pushed_at", "Last push"),
+]
+
+
+def _summary_value(value):
+
+    if isinstance(value, (list, tuple, dict, set)) or isinstance(value, pd.DataFrame):
+        return None
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+
+        stamp = _utc_stamp(value)
+
+        return None if stamp is None else stamp.strftime("%Y-%m-%d %H:%M UTC")
+
+    if not pd.api.types.is_scalar(value) or pd.isna(value):
+        return None
+
+    if hasattr(value, "item"):
+        value = value.item()
+
+    if isinstance(value, float):
+        return round(value, 2)
+
+    return value
+
+
+def build_summary_metrics_table(analysis, selected_analyses):
+
+    selected = set(selected_analyses or [])
+    rows = []
+
+    def add(section, metric, value):
+
+        value = _summary_value(value)
+
+        if value is not None:
+            rows.append({"section": section, "metric": metric, "value": value})
+
+    repository = analysis.get("repository") or {}
+
+    for key, label in SUMMARY_REPOSITORY_FIELDS:
+        add("Repository", label, repository.get(key))
+
+    license_info = repository.get("license")
+    add("Repository", "License", license_info.get("spdx_id") if isinstance(license_info, dict) else None)
+
+    add("Analysis", "Period", analysis.get("period"))
+    add("Analysis", "Window start", analysis.get("period_start"))
+    add("Analysis", "Window end", analysis.get("period_end"))
+
+    health = analysis.get("health_score") or {}
+    add("Health score", "Overall score", health.get("overall"))
+    add("Health score", "Overall label", health.get("label"))
+
+    for component in health.get("components") or []:
+        add("Health score", f"{component['name']} score", component.get("score"))
+
+    for section, required, keys in SUMMARY_SECTIONS:
+
+        if required not in selected:
+            continue
+
+        for key in keys:
+
+            source = analysis.get(key)
+
+            if not isinstance(source, dict):
+                continue
+
+            for name, value in source.items():
+                add(section, name.replace("_", " ").strip().capitalize(), value)
+
+    trends = analysis.get("trend_detection") or {}
+
+    for row in trends.get("rows") or []:
+        add("Trends", f"{row['name']} trend", row["label"])
+        add("Trends", f"{row['name']} change in later half (%)", row["change"])
+
+    return pd.DataFrame(rows, columns=["section", "metric", "value"])

@@ -32,6 +32,16 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from data_processor import (
+    LEADERBOARD_FOOT,
+    LEADERBOARD_METHODS,
+    SNAPSHOT_FOOT,
+    SNAPSHOT_METHODS,
+    TABLE_FILTER_MAX_OPTIONS,
+    TREND_FOOT,
+    TREND_METHODS,
+    TREND_MIN_EVENTS,
+    build_summary_metrics_table,
+    calculate_snapshot_areas,
     TABLE_SEARCH_MIN_ROWS,
     TABLE_TOOLS_FOOT,
     TABLE_TOOLS_METHODS,
@@ -1757,15 +1767,30 @@ def export_file_stem(title):
     return f"{repo}-{slug}"
 
 
-def render_table_tools(key, title, df, filter_columns=None):
+def render_table_tools(key, title, df, filter_columns=None, date_column=None):
 
     filter_columns = filter_columns or {}
     searchable = len(df) >= TABLE_SEARCH_MIN_ROWS
-    widths = ([2.4] + [1.3] * len(filter_columns)) if searchable else [3.7]
+
+    date_bounds = None
+
+    if searchable and date_column and date_column in df.columns:
+
+        stamps = pd.to_datetime(df[date_column], utc=True, errors="coerce").dropna()
+
+        if not stamps.empty:
+            date_bounds = (stamps.min().date(), stamps.max().date())
+
+    widths = (
+        [2.4] + [1.3] * len(filter_columns) + ([2.0] if date_bounds else [])
+        if searchable
+        else [3.7]
+    )
     cols = st.columns(widths + [0.8, 1.4], gap="small", vertical_alignment="bottom")
 
     query = ""
     chosen = {}
+    date_range = None
 
     if searchable:
 
@@ -1780,7 +1805,14 @@ def render_table_tools(key, title, df, filter_columns=None):
         for index, (column, label) in enumerate(filter_columns.items(), start=1):
 
             options = (
-                sorted(df[column].dropna().astype(str).unique())
+                sorted(
+                    df[column]
+                    .dropna()
+                    .astype(str)
+                    .value_counts()
+                    .head(TABLE_FILTER_MAX_OPTIONS)
+                    .index
+                )
                 if column in df.columns
                 else []
             )
@@ -1794,7 +1826,29 @@ def render_table_tools(key, title, df, filter_columns=None):
                     label_visibility="collapsed",
                 )
 
-    filtered = filter_table(df, query, chosen) if searchable else df
+        if date_bounds:
+
+            low, high = date_bounds
+
+            with cols[1 + len(filter_columns)]:
+                picked = st.date_input(
+                    "Date range",
+                    value=(low, high),
+                    min_value=low,
+                    max_value=high,
+                    key=f"tdate_{key}_{low}_{high}",
+                    format="YYYY-MM-DD",
+                    label_visibility="collapsed",
+                )
+
+            if isinstance(picked, (tuple, list)) and len(picked) == 2 and tuple(picked) != (low, high):
+                date_range = (picked[0], picked[1])
+
+    filtered = (
+        filter_table(df, query, chosen, date_column=date_column, date_range=date_range)
+        if searchable
+        else df
+    )
     stem = export_file_stem(title)
 
     with cols[-2]:
@@ -1812,6 +1866,7 @@ def render_table_tools(key, title, df, filter_columns=None):
         len(filtered),
         query,
         tuple(sorted((column, tuple(values)) for column, values in chosen.items())),
+        date_range,
     )
     ready = st.session_state.xlsx_ready.get(key)
 
@@ -1850,7 +1905,7 @@ def render_table_tools(key, title, df, filter_columns=None):
     return filtered
 
 
-def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart", filter_columns=None):
+def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart", filter_columns=None, date_column=None):
 
     if fig is not None:
         with card_open(f"{key}_chart", title, subtitle):
@@ -1889,7 +1944,7 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
             with card_open(f"{key}_table", f"{title} table", "Detailed data for this analysis."):
                 table_action_cols = st.columns([1, 0.08, 0.08], gap="small")
 
-                view_df = render_table_tools(key, title, df, filter_columns)
+                view_df = render_table_tools(key, title, df, filter_columns, date_column)
 
                 with table_action_cols[1]:
                     st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
@@ -2505,6 +2560,7 @@ def render_commits_section(analysis):
         df=table,
         column_config=commit_config,
         height=360,
+        date_column="date",
     )
 
     if not monthly_trend.empty:
@@ -2580,7 +2636,32 @@ def render_contributors_section(analysis):
         empty_state("No contributor data", "GitHub returned no contributors for this repository.", "users")
         return
 
+    leaderboard = analysis.get("contributor_leaderboard")
+
+    if leaderboard is None or leaderboard.empty:
+        leaderboard = contributors_df
+
+    leaderboard_order = [
+        column
+        for column in (
+            "rank",
+            "username",
+            "contributions",
+            "contribution_percentage",
+            "active_days",
+            "first_contribution",
+            "last_contribution",
+            "activity_trend",
+        )
+        if column in leaderboard.columns
+    ]
+
     contributor_config = {
+        "rank": st.column_config.NumberColumn("#", format="%d"),
+        "active_days": st.column_config.NumberColumn("Active days", format="%d"),
+        "first_contribution": st.column_config.DatetimeColumn("First contribution", format="D MMM YYYY"),
+        "last_contribution": st.column_config.DatetimeColumn("Last contribution", format="D MMM YYYY"),
+        "activity_trend": st.column_config.TextColumn("Activity trend"),
         "username": st.column_config.TextColumn("Username"),
         "contributions": st.column_config.NumberColumn("Contributions", format="%d"),
         "contribution_percentage": st.column_config.ProgressColumn(
@@ -2596,9 +2677,18 @@ def render_contributors_section(analysis):
         "Top contributors",
         "Contribution distribution and the detailed contributor table.",
         fig=contributors_figure(contributors_df),
-        df=contributors_df,
+        df=leaderboard,
         column_config=contributor_config,
         height=360,
+        column_order=leaderboard_order,
+    )
+
+    render_methodology(
+        "leaderboard_method",
+        "How the contributor leaderboard is built",
+        "Each column in the table follows these rules.",
+        LEADERBOARD_METHODS,
+        LEADERBOARD_FOOT,
     )
 
     total_contributors = metrics["total_contributors"]
@@ -2675,7 +2765,8 @@ def render_issues_section(analysis):
         df=table,
         column_config=issue_config,
         height=360,
-        filter_columns={"state": "State"},
+        filter_columns={"state": "State", "author": "Author"},
+        date_column="created_at",
     )
 
     insight_cards([
@@ -2716,8 +2807,16 @@ def render_pull_requests_section(analysis):
         return
 
     state_counts = pr_df["state"].value_counts().to_dict()
-    table = pr_df.sort_values("created_at", ascending=False)
+    table = pr_df.sort_values("created_at", ascending=False).copy()
+    merge_status = pd.Series("Open", index=table.index)
+    merge_status[table["state"].eq("closed")] = "Closed without merge"
+
+    if "merged_at" in table.columns:
+        merge_status[table["merged_at"].notna()] = "Merged"
+
+    table["merge_status"] = merge_status
     pr_config = {
+        "merge_status": st.column_config.TextColumn("Merge status"),
         "number": st.column_config.NumberColumn("#", format="%d"),
         "title": st.column_config.TextColumn("Title", width="large"),
         "state": st.column_config.TextColumn("State"),
@@ -2736,7 +2835,8 @@ def render_pull_requests_section(analysis):
         df=table,
         column_config=pr_config,
         height=360,
-        filter_columns={"state": "State"},
+        filter_columns={"state": "State", "merge_status": "Merge status", "author": "Author"},
+        date_column="created_at",
     )
 
     insight_cards([
@@ -3612,7 +3712,22 @@ def render_repository_snapshot(analysis, selected):
         "bulb",
     )
 
+    area_tones = {"High": "success", "Good": "success", "Medium": "blue", "Fair": "blue", "Low": "warning", "Poor": "warning"}
     cards = []
+
+    areas = calculate_snapshot_areas(analysis.get("health_score"))
+
+    if any(area["score"] is not None for area in areas):
+
+        for area in areas:
+
+            cards.append({
+                "label": area["name"],
+                "value": area["label"],
+                "icon": HEALTH_ICONS.get(area["key"], "activity"),
+                "tone": area_tones.get(area["label"], ""),
+                "hint": f"Score {area['score']} / 100" if area["score"] is not None else area["reason"],
+            })
 
     created = to_timestamp(repository.get("created_at"))
     pushed = to_timestamp(repository.get("pushed_at"))
@@ -3719,8 +3834,17 @@ def render_repository_snapshot(analysis, selected):
         f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
         f'<span class="gs-period-note__icon">{icon("info", 15, 1.9)}</span>'
         f'<span>Every figure here is taken from the section that follows it; nothing is calculated separately. '
-        f'Repository age and last push are repository-level, and the rest cover the selected analysis window.</span>'
+        f'Repository age and last push are repository-level, and the rest cover the selected analysis window. '
+        f'Area ratings are bands of the health score components.</span>'
         f'</div>'
+    )
+
+    render_methodology(
+        "snapshot_method",
+        "How the area ratings are assigned",
+        "Each rating above follows these rules.",
+        SNAPSHOT_METHODS,
+        SNAPSHOT_FOOT,
     )
 
 
@@ -4639,6 +4763,8 @@ def export_tables(analysis, selected):
         if isinstance(df, pd.DataFrame) and not df.empty:
             tables.append((name, df))
 
+    add("Summary metrics", build_summary_metrics_table(analysis, selected))
+
     if "Commits" in selected:
         commits = analysis["commits"]
         add("Commits", commits[[c for c in ("date", "author", "message", "sha") if c in commits.columns]] if not commits.empty else commits)
@@ -4647,7 +4773,8 @@ def export_tables(analysis, selected):
         add("Commit activity heatmap", analysis.get("commit_heatmap_matrix"))
 
     if "Contributors" in selected:
-        add("Contributors", analysis["contributors"])
+        leaderboard = analysis.get("contributor_leaderboard")
+        add("Contributors", leaderboard if isinstance(leaderboard, pd.DataFrame) and not leaderboard.empty else analysis["contributors"])
 
     if "Issues" in selected:
         add("Issues", analysis["issues"])
@@ -4863,6 +4990,72 @@ def render_api_usage(analysis):
     )
 
 
+def render_trend_detection(analysis):
+
+    trends = analysis.get("trend_detection") or {}
+    rows = trends.get("rows") or []
+
+    if not rows:
+        return
+
+    section_header(
+        "Trend Detection",
+        "Whether commit, issue and pull request activity is rising, steady or falling across the analysis window.",
+        "trending",
+    )
+
+    tones = {"Increasing": "success", "Stable": "blue", "Declining": "warning"}
+    cards = []
+
+    for row in rows:
+
+        if row["label"] == "Not enough data":
+            hint = f"Fewer than {TREND_MIN_EVENTS} {row['unit']} in this window"
+        elif row["change"] is None:
+            hint = f"{fmt_int(row['later'])} vs {fmt_int(row['earlier'])} {row['unit']}"
+        else:
+            hint = f"{row['change']:+.0f}% · {fmt_int(row['later'])} vs {fmt_int(row['earlier'])} {row['unit']}"
+
+        cards.append({
+            "label": row["name"],
+            "value": f"{row['arrow']} {row['label']}",
+            "icon": "trending",
+            "tone": tones.get(row["label"], ""),
+            "hint": hint,
+        })
+
+    kpi_grid(cards)
+
+    insight_cards(
+        [
+            {"icon": "trending", "title": row["name"], "body_html": esc(row["sentence"])}
+            for row in rows
+        ],
+        stack=True,
+    )
+
+    start = to_timestamp(trends.get("window_start"))
+    mid = to_timestamp(trends.get("midpoint"))
+    end = to_timestamp(trends.get("window_end"))
+
+    if start is not None and mid is not None and end is not None:
+        render_html(
+            f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+            f'<span class="gs-period-note__icon">{icon("calendar", 15, 1.9)}</span>'
+            f'<span>Earlier half: {esc(fmt_date(start))} – {esc(fmt_date(mid))} · '
+            f'Later half: {esc(fmt_date(mid))} – {esc(fmt_date(end))}</span>'
+            f'</div>'
+        )
+
+    render_methodology(
+        "trend_method",
+        "How trends are classified",
+        "Each label above follows these rules.",
+        TREND_METHODS,
+        TREND_FOOT,
+    )
+
+
 def render_results():
 
     analysis = st.session_state.analysis
@@ -4896,6 +5089,9 @@ def render_results():
 
         if selected:
             render_health_score(analysis)
+
+        if selected & {"Commits", "Issues", "Pull Requests"}:
+            render_trend_detection(analysis)
 
         if "Commits" in selected:
             render_commits_section(analysis)
