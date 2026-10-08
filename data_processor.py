@@ -597,7 +597,8 @@ def calculate_contributor_concentration(df):
 
     metrics = {
         "top_contributor_concentration": 0.0,
-        "top_3_contributor_concentration": 0.0
+        "top_3_contributor_concentration": 0.0,
+        "top_5_contributor_concentration": 0.0
     }
 
     if df.empty:
@@ -617,6 +618,12 @@ def calculate_contributor_concentration(df):
 
     metrics["top_3_contributor_concentration"] = float(
         df.head(3)[
+            "contribution_percentage"
+        ].sum()
+    )
+
+    metrics["top_5_contributor_concentration"] = float(
+        df.head(5)[
             "contribution_percentage"
         ].sum()
     )

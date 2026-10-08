@@ -2271,6 +2271,13 @@ def render_contributors_section(analysis):
         {"label": "Top Contributor", "value": metrics["top_contributor"], "icon": "user", "tone": "violet", "wrap_text": True},
         {"label": "Top Contributor Share", "value": format_percentage(concentration["top_contributor_concentration"]), "icon": "percent", "tone": "blue"},
         {"label": "Top 3 Share", "value": format_percentage(concentration["top_3_contributor_concentration"]), "icon": "trending", "tone": "success"},
+        {
+            "label": "Top 5 Share",
+            "value": format_percentage(concentration["top_5_contributor_concentration"]),
+            "icon": "users",
+            "tone": "violet",
+            "hint": f"All {fmt_int(metrics['total_contributors'])} contributors" if metrics["total_contributors"] <= 5 else None,
+        },
     ])
 
     if contributors_df.empty:
@@ -2298,18 +2305,34 @@ def render_contributors_section(analysis):
         height=360,
     )
 
+    total_contributors = metrics["total_contributors"]
+
+    if total_contributors > 5:
+        top_5_body = (
+            f"The top 5 contributors account for "
+            f"<strong>{format_percentage(concentration['top_5_contributor_concentration'])}</strong> "
+            f"of measured contribution activity."
+        )
+    else:
+        top_5_body = (
+            f"Only <strong>{fmt_int(total_contributors)}</strong> contributor(s) were measured, "
+            f"so the top 5 covers <strong>{format_percentage(concentration['top_5_contributor_concentration'])}</strong> "
+            f"of measured contribution activity."
+        )
+
     insight_cards([
         {
             "icon": "user",
-            "title": "Contribution concentration",
+            "title": "Contributor concentration",
             "body_html": f"<strong>{esc(metrics['top_contributor'])}</strong> accounts for "
-                         f"<strong>{format_percentage(concentration['top_contributor_concentration'])}</strong> of analyzed contributions.",
+                         f"<strong>{format_percentage(concentration['top_contributor_concentration'])}</strong> of measured contribution activity, "
+                         f"and the top 3 contributors together account for "
+                         f"<strong>{format_percentage(concentration['top_3_contributor_concentration'])}</strong>.",
         },
         {
             "icon": "users",
-            "title": "Top 3 combined",
-            "body_html": f"The top 3 contributors together make up "
-                         f"<strong>{format_percentage(concentration['top_3_contributor_concentration'])}</strong> of all contributions.",
+            "title": "Top 5 combined",
+            "body_html": top_5_body,
         },
     ])
 
