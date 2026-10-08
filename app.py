@@ -20,6 +20,7 @@ Layout of this file
 
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime
 from urllib.parse import quote
@@ -30,6 +31,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from data_processor import (
+    TABLE_SEARCH_MIN_ROWS,
+    TABLE_TOOLS_FOOT,
+    TABLE_TOOLS_METHODS,
+    dataframe_to_csv_bytes,
+    filter_table,
+    tables_to_excel_bytes,
     ISSUE_RESOLUTION_FOOT,
     ISSUE_RESOLUTION_METHODS,
     PR_HEALTH_FOOT,
@@ -41,7 +48,22 @@ from data_processor import (
     VELOCITY_FOOT,
     VELOCITY_METHODS,
 )
-from github_api import PERIOD_OPTIONS, analyze_repository
+from github_api import (
+    ANALYSIS_CACHE_TTL_SECONDS,
+    GITHUB_TOKEN,
+    PERIOD_OPTIONS,
+    RATE_LIMIT_FOOT,
+    RATE_LIMIT_METHODS,
+    AccessDeniedError,
+    AuthError,
+    GraphQLError,
+    NetworkError,
+    NotFoundError,
+    RateLimitError,
+    RunTracker,
+    ServerError,
+    analyze_repository,
+)
 
 st.set_page_config(
     page_title="RepoMetric",
@@ -1298,6 +1320,47 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-method__foot { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--gs-border); font-size: 0.84rem; color: var(--gs-text-3); }
 
 
+.gs-period-note--warn { border-color: rgba(227,169,79,0.35); background: rgba(227,169,79,0.08); }
+
+.gs-stages { display: flex; flex-direction: column; gap: 8px; margin: 0 0 18px; }
+
+.gs-stage {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--gs-border);
+    border-radius: 11px;
+    background: var(--gs-surface-2);
+    font-size: 0.88rem;
+}
+
+.gs-stage__dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--gs-text-3); }
+.gs-stage--running .gs-stage__dot { background: var(--gs-accent); box-shadow: 0 0 0 4px rgba(110,123,255,0.22); }
+.gs-stage--done .gs-stage__dot { background: var(--gs-success); }
+.gs-stage--failed .gs-stage__dot { background: var(--gs-danger); }
+.gs-stage__name { flex: 1; min-width: 0; font-weight: 500; color: var(--gs-text); }
+.gs-stage--pending .gs-stage__name { color: var(--gs-text-3); }
+.gs-stage__meta { color: var(--gs-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gs-stage--running .gs-stage__meta { color: var(--gs-text-2); }
+
+.gs-status { font-size: 0.9rem; color: var(--gs-text-2); line-height: 1.5; }
+.gs-status b { color: var(--gs-text); font-weight: 600; }
+
+.gs-rate { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--gs-border); border-radius: 12px; background: var(--gs-surface-2); }
+.gs-rate--warn { border-color: rgba(227,169,79,0.4); background: rgba(227,169,79,0.07); }
+.gs-rate__row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.gs-rate__name { flex: 0 0 70px; font-size: 0.84rem; font-weight: 600; color: var(--gs-text); }
+.gs-rate__text { font-size: 0.84rem; color: var(--gs-text-2); font-variant-numeric: tabular-nums; }
+.gs-rate__foot { font-size: 0.8rem; color: var(--gs-text-3); line-height: 1.45; }
+.gs-meter { flex: 1 1 140px; min-width: 100px; height: 6px; overflow: hidden; border-radius: 6px; background: rgba(255,255,255,0.08); }
+.gs-meter__fill { height: 100%; border-radius: 6px; }
+
+.gs-table-count { font-size: 0.84rem; color: var(--gs-text-3); line-height: 34px; }
+
+div[class*="st-key-tsearch_"] input { min-height: 34px; font-size: 0.88rem; }
+
+
 .stApp iframe { border: 0; border-radius: 12px; color-scheme: dark; }
 
 
@@ -1510,7 +1573,82 @@ def card_open(key, title=None, subtitle=None):
         yield
 
 
-def loading_panel(owner, repo, selected, period=None):
+def fmt_elapsed(seconds):
+
+    if seconds is None:
+        return ""
+
+    return f"{seconds:.1f}s" if seconds < 100 else f"{seconds / 60:.1f} min"
+
+
+def fmt_age(seconds):
+
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "N/A"
+
+    if value < 60:
+        return f"{value:.0f} s"
+
+    return f"{value / 60:.0f} min"
+
+
+def stage_rows_html(snapshot):
+
+    if not snapshot or not snapshot["stages"]:
+        return ""
+
+    rows = []
+
+    for stage in snapshot["stages"]:
+
+        status = stage["status"]
+
+        if status == "pending":
+            meta = "Waiting"
+        elif status == "failed":
+            meta = "Failed" if not stage["records"] else f"Failed after {fmt_int(stage['records'])} records"
+        else:
+
+            parts = []
+
+            if stage["records"]:
+                parts.append(f"{fmt_int(stage['records'])} records")
+
+            if stage["pages"] > 1:
+                parts.append(f"{fmt_int(stage['pages'])} pages")
+
+            if status == "running" and not parts:
+                parts.append("Fetching")
+
+            if stage["elapsed"] is not None:
+                parts.append(fmt_elapsed(stage["elapsed"]))
+
+            meta = " · ".join(parts)
+
+        rows.append(
+            f'<div class="gs-stage gs-stage--{status}">'
+            f'<span class="gs-stage__dot"></span>'
+            f'<span class="gs-stage__name">{esc(stage["label"])}</span>'
+            f'<span class="gs-stage__meta">{esc(meta)}</span>'
+            f'</div>'
+        )
+
+    return f'<div class="gs-stages">{"".join(rows)}</div>'
+
+
+def loading_panel(owner, repo, selected, period=None, snapshot=None):
+
+    stages_html = stage_rows_html(snapshot)
+
+    progress_line = ""
+
+    if snapshot and snapshot["total"]:
+        progress_line = (
+            f' &middot; {snapshot["done"]} of {snapshot["total"]} steps done'
+            f' &middot; {fmt_int(snapshot["requests"])} request(s)'
+        )
 
     chips = "".join(
         f'<span class="gs-chip">{icon(ANALYSIS_META[name]["icon"], 13)}{esc(name)}</span>'
@@ -1525,10 +1663,11 @@ def loading_panel(owner, repo, selected, period=None):
             <div class="gs-spinner"></div>
             <div style="min-width:0;">
                 <div class="gs-loader__title">Fetching data from the GitHub API</div>
-                <div class="gs-loader__sub">{esc(owner)}/{esc(repo)} &middot; {len(selected)} module{'s' if len(selected) != 1 else ''} selected &middot; {esc(period or "All Time")}</div>
+                <div class="gs-loader__sub">{esc(owner)}/{esc(repo)} &middot; {len(selected)} module{'s' if len(selected) != 1 else ''} selected &middot; {esc(period or "All Time")}{progress_line}</div>
             </div>
         </div>
         <div class="gs-loader__bar"></div>
+        {stages_html}
         <div class="gs-loader__chips">{chips}</div>
         <div class="gs-skel-grid">{skel_kpis}</div>
     </div>
@@ -1559,6 +1698,7 @@ def expanded_view(title, fig=None, df=None, column_config=None, height=520, colu
             width="stretch",
             height=height,
             config={**PLOTLY_CONFIG, "responsive": True},
+            key="expanded_view_plot",
         )
 
     if df is not None:
@@ -1572,7 +1712,111 @@ def expanded_view(title, fig=None, df=None, column_config=None, height=520, colu
         )
 
 
-def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart"):
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def export_file_stem(title):
+
+    slug = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-") or "table"
+    repo = re.sub(r"[^a-z0-9._-]+", "-", str(st.session_state.get("analyzed_repo") or "repometric").lower()).strip("-")
+
+    return f"{repo}-{slug}"
+
+
+def render_table_tools(key, title, df, filter_columns=None):
+
+    filter_columns = filter_columns or {}
+    searchable = len(df) >= TABLE_SEARCH_MIN_ROWS
+    widths = ([2.4] + [1.3] * len(filter_columns)) if searchable else [3.7]
+    cols = st.columns(widths + [0.8, 1.4], gap="small", vertical_alignment="bottom")
+
+    query = ""
+    chosen = {}
+
+    if searchable:
+
+        with cols[0]:
+            query = st.text_input(
+                "Search this table",
+                key=f"tsearch_{key}",
+                placeholder="Search this table",
+                label_visibility="collapsed",
+            )
+
+        for index, (column, label) in enumerate(filter_columns.items(), start=1):
+
+            options = (
+                sorted(df[column].dropna().astype(str).unique())
+                if column in df.columns
+                else []
+            )
+
+            with cols[index]:
+                chosen[column] = st.multiselect(
+                    label,
+                    options,
+                    key=f"tfilter_{key}_{column}",
+                    placeholder=label,
+                    label_visibility="collapsed",
+                )
+
+    filtered = filter_table(df, query, chosen) if searchable else df
+    stem = export_file_stem(title)
+
+    with cols[-2]:
+        st.download_button(
+            "CSV",
+            data=dataframe_to_csv_bytes(filtered),
+            file_name=f"{stem}.csv",
+            mime="text/csv",
+            key=f"dl_{key}_csv",
+            on_click="ignore",
+        )
+
+    signature = (
+        st.session_state.get("analysis_stamp"),
+        len(filtered),
+        query,
+        tuple(sorted((column, tuple(values)) for column, values in chosen.items())),
+    )
+    ready = st.session_state.xlsx_ready.get(key)
+
+    with cols[-1]:
+
+        if ready is not None and ready["signature"] == signature:
+            st.download_button(
+                "Download Excel",
+                data=ready["data"],
+                file_name=f"{stem}.xlsx",
+                mime=XLSX_MIME,
+                key=f"dl_{key}_xlsx",
+                on_click="ignore",
+            )
+
+        elif st.button("Prepare Excel", key=f"dl_{key}_xlsx_prep"):
+
+            with st.spinner("Building the Excel file"):
+                data, _ = tables_to_excel_bytes([(title, filtered)])
+
+            st.session_state.xlsx_ready[key] = {"signature": signature, "data": data}
+            st.rerun()
+
+    count_text = (
+        f"Showing {fmt_int(len(filtered))} of {fmt_int(len(df))} rows"
+        if searchable
+        else f"{fmt_int(len(df))} rows"
+    )
+
+    if searchable:
+        render_html(f'<div class="gs-table-count">{esc(count_text)}</div>')
+    else:
+        with cols[0]:
+            render_html(f'<div class="gs-table-count">{esc(count_text)}</div>')
+
+    return filtered
+
+
+def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart", filter_columns=None):
 
     if fig is not None:
         with card_open(f"{key}_chart", title, subtitle):
@@ -1586,7 +1830,7 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
                         height=max(height, 520),
                     )
                 st.markdown('</div>', unsafe_allow_html=True)
-            render_chart(fig)
+            render_chart(fig, key=f"{key}_plot")
 
     if df is not None:
         table_state_key = f"table_visible_{key}"
@@ -1611,12 +1855,14 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
             with card_open(f"{key}_table", f"{title} table", "Detailed data for this analysis."):
                 table_action_cols = st.columns([1, 0.08, 0.08], gap="small")
 
+                view_df = render_table_tools(key, title, df, filter_columns)
+
                 with table_action_cols[1]:
                     st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
                     if st.button("Expand", key=f"{key}_table_expand", width="stretch"):
                         expanded_view(
                             f"{title} table",
-                            df=df,
+                            df=view_df,
                             column_config=column_config,
                             height=max(height, 520),
                             column_order=column_order,
@@ -1634,12 +1880,15 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
                         st.rerun()
                     st.markdown('</div>', unsafe_allow_html=True)
 
-                styled_dataframe(
-                    df,
-                    column_config=column_config,
-                    height=height,
-                    column_order=column_order,
-                )
+                if view_df.empty and not df.empty:
+                    render_html('<div class="gs-empty-chart">No rows match the current search and filters.</div>')
+                else:
+                    styled_dataframe(
+                        view_df,
+                        column_config=column_config,
+                        height=height,
+                        column_order=column_order,
+                    )
 
 def _style_figure(fig, height=340, legend=True):
     """Apply the shared dark theme to any Plotly figure in place."""
@@ -1694,13 +1943,14 @@ PLOTLY_CONFIG = {
 }
 
 
-def render_chart(fig):
+def render_chart(fig, key=None):
 
     fig.update_layout(autosize=True)
     st.plotly_chart(
         fig,
         width="stretch",
         config={**PLOTLY_CONFIG, "responsive": True},
+        key=key,
     )
 
 
@@ -2236,7 +2486,7 @@ def render_commits_section(analysis):
                         height=560,
                     )
                 st.markdown('</div>', unsafe_allow_html=True)
-            render_chart(monthly_fig)
+            render_chart(monthly_fig, key="commits_monthly_plot")
 
     insight_items = [
         {
@@ -2391,6 +2641,7 @@ def render_issues_section(analysis):
         df=table,
         column_config=issue_config,
         height=360,
+        filter_columns={"state": "State"},
     )
 
     insight_cards([
@@ -2451,6 +2702,7 @@ def render_pull_requests_section(analysis):
         df=table,
         column_config=pr_config,
         height=360,
+        filter_columns={"state": "State"},
     )
 
     insight_cards([
@@ -3299,6 +3551,11 @@ def init_state():
         "analyzed_repo": None,
         "error": None,
         "is_analyzing": False,
+        "refresh_requested": False,
+        "analysis_stamp": None,
+        "analyzed_period": None,
+        "xlsx_ready": {},
+        "workbook_ready": None,
     }
 
     for key, value in defaults.items():
@@ -3429,6 +3686,91 @@ def render_control_panel():
     return analyze_clicked
 
 
+def error_state_for(exc):
+
+    extra = {
+        "reset_epoch": getattr(exc, "reset_epoch", None),
+        "retry_after": getattr(exc, "retry_after", None),
+        "secondary": getattr(exc, "secondary", False),
+    }
+
+    if isinstance(exc, RateLimitError):
+        kind = "rate_limit"
+    elif isinstance(exc, NotFoundError):
+        kind = "not_found"
+    elif isinstance(exc, AuthError):
+        kind = "auth"
+    elif isinstance(exc, AccessDeniedError):
+        kind = "access_denied"
+    elif isinstance(exc, NetworkError):
+        kind = "network"
+    elif isinstance(exc, ServerError):
+        kind = "server"
+    elif isinstance(exc, GraphQLError):
+        kind = "graphql"
+    else:
+        kind = "api_error"
+
+    return (kind, str(exc), extra)
+
+
+def execute_analysis(owner, repo, selected, period, force_refresh=False):
+
+    st.session_state.error = None
+
+    placeholder = st.empty()
+    tracker = RunTracker()
+    chosen = sorted(selected)
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    future = executor.submit(
+        analyze_repository,
+        owner,
+        repo,
+        selected_analyses=list(selected) or None,
+        period=period,
+        force_refresh=force_refresh,
+        progress=tracker,
+    )
+
+    try:
+
+        while True:
+
+            with placeholder.container():
+                loading_panel(owner, repo, chosen, period, tracker.snapshot())
+
+            finished, _ = wait([future], timeout=0.4)
+
+            if finished:
+                break
+
+        analysis = future.result()
+
+    except Exception as exc:
+
+        placeholder.empty()
+
+        st.session_state.analysis = None
+        st.session_state.error = error_state_for(exc)
+
+        return
+
+    finally:
+        executor.shutdown(wait=False)
+
+    placeholder.empty()
+
+    st.session_state.analysis = analysis
+    st.session_state.analyzed_owner = owner
+    st.session_state.analyzed_repo = repo
+    st.session_state.ran_selected = list(selected)
+    st.session_state.analyzed_period = period
+    st.session_state.analysis_stamp = analysis["fetched_at"].isoformat()
+    st.session_state.xlsx_ready = {}
+    st.session_state.workbook_ready = None
+
+
 def run_analysis():
 
     owner, repo = parse_github_url(st.session_state.repo_url)
@@ -3438,65 +3780,95 @@ def run_analysis():
         st.session_state.error = (
             "invalid_url",
             "That doesn't look like a GitHub repository URL. "
-            "Use the form https://github.com/owner/repository."
+            "Use the form https://github.com/owner/repository.",
+            None,
         )
         st.session_state.analysis = None
 
         return
 
-    st.session_state.error = None
-
-    placeholder = st.empty()
-
-    with placeholder.container():
-        loading_panel(owner, repo, sorted(st.session_state.selected), st.session_state.selected_period)
-
-    try:
-
-        analysis = analyze_repository(
-            owner,
-            repo,
-            selected_analyses=list(st.session_state.selected) or None,
-            period=st.session_state.selected_period,
-        )
-
-    except Exception as exc:
-
-        placeholder.empty()
-
-        st.session_state.analysis = None
-        st.session_state.error = ("api_error", str(exc))
-
-        return
-
-    placeholder.empty()
-
-    st.session_state.analysis = analysis
-    st.session_state.analyzed_owner = owner
-    st.session_state.analyzed_repo = repo
-    st.session_state.ran_selected = list(st.session_state.selected)
+    execute_analysis(
+        owner,
+        repo,
+        set(st.session_state.selected),
+        st.session_state.selected_period,
+    )
 
 
-def render_error(kind, message):
+def request_refresh():
+
+    st.session_state.refresh_requested = True
+
+
+def refresh_analysis():
+
+    execute_analysis(
+        st.session_state.analyzed_owner,
+        st.session_state.analyzed_repo,
+        set(st.session_state.get("ran_selected", [])),
+        st.session_state.analyzed_period or "All Time",
+        force_refresh=True,
+    )
+
+
+def fmt_reset(epoch):
+
+    stamp = to_timestamp(pd.to_datetime(epoch, unit="s", utc=True)) if epoch is not None else None
+
+    if stamp is None:
+        return "an unknown time"
+
+    return f"{stamp.strftime('%H:%M')} UTC"
+
+
+def reset_phrase(extra):
+
+    extra = extra or {}
+    retry_after = extra.get("retry_after")
+    reset_epoch = extra.get("reset_epoch")
+
+    if retry_after is not None:
+        return f"GitHub asks you to wait about {fmt_int(retry_after)} second(s) before trying again."
+
+    if reset_epoch is not None:
+
+        remaining = max(0, int(reset_epoch - pd.Timestamp.now(tz="UTC").timestamp()))
+
+        return f"The allowance resets at {fmt_reset(reset_epoch)}, in about {max(1, round(remaining / 60))} minute(s)."
+
+    return "GitHub did not say when the allowance resets, so try again in a few minutes."
+
+
+def render_error(kind, message, extra=None):
 
     if kind == "invalid_url":
 
         notice("warning", "Check the repository URL", message)
         return
 
-    lowered = message.lower()
+    if kind == "rate_limit":
 
-    if "rate limit" in lowered:
+        if (extra or {}).get("secondary"):
+            title = "GitHub is slowing requests down"
+            body = (
+                "GitHub applied a secondary rate limit because many requests were sent in a short time. "
+                + reset_phrase(extra)
+            )
+        else:
+            title = "GitHub API rate limit reached"
+            body = (
+                "RepoMetric has used the GitHub API allowance available to it. "
+                + reset_phrase(extra)
+                + (
+                    ""
+                    if GITHUB_TOKEN
+                    else " Add a GITHUB_TOKEN to raise the limit."
+                )
+            )
 
-        notice(
-            "error",
-            "GitHub API rate limit reached",
-            "RepoMetric has hit GitHub's API rate limit for this token. "
-            "Add a GITHUB_TOKEN to raise the limit, or try again shortly.",
-            detail=message,
-        )
+        notice("error", title, body, detail=message)
 
-    elif "404" in message:
+    elif kind == "not_found":
 
         notice(
             "error",
@@ -3506,13 +3878,51 @@ def render_error(kind, message):
             detail=message,
         )
 
-    elif "403" in lowered:
+    elif kind == "access_denied":
 
         notice(
             "error",
             "Access denied by GitHub",
             "GitHub refused this request. The repository may be private, or the API token "
             "may lack the required permissions.",
+            detail=message,
+        )
+
+    elif kind == "auth":
+
+        notice(
+            "error",
+            "GitHub rejected the access token",
+            "The GITHUB_TOKEN in use is invalid, expired or revoked. Replace it with a valid token, "
+            "or remove it to continue with unauthenticated access and its lower rate limit.",
+            detail=message,
+        )
+
+    elif kind == "network":
+
+        notice(
+            "error",
+            "Couldn't reach GitHub",
+            "The connection to the GitHub API failed after several attempts. "
+            "Check the network connection and try again.",
+            detail=message,
+        )
+
+    elif kind == "server":
+
+        notice(
+            "error",
+            "GitHub is having trouble",
+            "GitHub's servers returned an error. This is usually temporary, so try again in a moment.",
+            detail=message,
+        )
+
+    elif kind == "graphql":
+
+        notice(
+            "error",
+            "GitHub GraphQL returned an error",
+            "The issues request was rejected by GitHub's GraphQL API.",
             detail=message,
         )
 
@@ -3524,6 +3934,251 @@ def render_error(kind, message):
             "Something went wrong while talking to the GitHub API.",
             detail=message,
         )
+
+
+def rate_buckets(info):
+
+    buckets = (info or {}).get("buckets") or {}
+    rows = []
+
+    for name, label in (("core", "REST"), ("graphql", "GraphQL")):
+
+        bucket = buckets.get(name)
+
+        if bucket and bucket.get("limit") and bucket.get("remaining") is not None:
+            rows.append((label, bucket))
+
+    return rows
+
+
+def rate_is_low(info):
+
+    low_share = (info or {}).get("low_share", 0.10)
+
+    return any(bucket["remaining"] / bucket["limit"] < low_share for _, bucket in rate_buckets(info))
+
+
+def render_rate_limit_bar(analysis):
+
+    info = analysis.get("rate_limit") or {}
+    rows = rate_buckets(info)
+
+    if not rows:
+
+        text = "GitHub did not report rate-limit information for this run."
+
+        render_html(
+            f'<div class="gs-rate"><div class="gs-rate__foot">{esc(text)}</div></div>'
+        )
+
+        return
+
+    low_share = info.get("low_share", 0.10)
+    items = []
+
+    for label, bucket in rows:
+
+        share = bucket["remaining"] / bucket["limit"]
+        color = THEME["warning"] if share < low_share else THEME["success"]
+
+        items.append(
+            f'<div class="gs-rate__row">'
+            f'<span class="gs-rate__name">{esc(label)}</span>'
+            f'<div class="gs-meter"><div class="gs-meter__fill" style="width:{max(2.0, share * 100):.1f}%;background:{color};"></div></div>'
+            f'<span class="gs-rate__text">{fmt_int(bucket["remaining"])} of {fmt_int(bucket["limit"])} left &middot; resets {esc(fmt_reset(bucket["reset"]))}</span>'
+            f'</div>'
+        )
+
+    foot_parts = []
+
+    if info.get("from_cache"):
+        foot_parts.append("No requests sent for this view; values are from the original fetch")
+    else:
+        foot_parts.append(f"{fmt_int(info.get('requests', 0))} request(s) sent for this run")
+
+    foot_parts.append("Authenticated with a token" if info.get("authenticated") else "No token configured, so GitHub's lower anonymous limit applies")
+
+    low = rate_is_low(info)
+    warn_class = " gs-rate--warn" if low else ""
+
+    if low:
+        foot_parts.append(f"Below {low_share * 100:.0f}% of the allowance remains")
+
+    render_html(
+        f'<div class="gs-rate{warn_class}">{"".join(items)}'
+        f'<div class="gs-rate__foot">{esc(" · ".join(foot_parts))}</div></div>'
+    )
+
+
+def fetched_status_html(analysis):
+
+    stamp = fmt_date(analysis.get("fetched_at"), with_time=True)
+    minutes = ANALYSIS_CACHE_TTL_SECONDS // 60
+
+    if analysis.get("from_cache"):
+        return (
+            f'<div class="gs-status"><b>Fetched {esc(stamp)} UTC</b> &middot; served from cache, '
+            f'{esc(fmt_age(analysis.get("cache_age_seconds")))} old. '
+            f'Results are reused for {minutes} minutes; use Refresh data to fetch again.</div>'
+        )
+
+    return (
+        f'<div class="gs-status"><b>Fetched {esc(stamp)} UTC</b> &middot; live from GitHub. '
+        f'This result is reused for {minutes} minutes if you analyze the same repository, modules and period again.</div>'
+    )
+
+
+def export_tables(analysis, selected):
+
+    tables = []
+
+    def add(name, df):
+
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            tables.append((name, df))
+
+    if "Commits" in selected:
+        commits = analysis["commits"]
+        add("Commits", commits[[c for c in ("date", "author", "message", "sha") if c in commits.columns]] if not commits.empty else commits)
+        add("Monthly commits", analysis["commit_monthly_trend"])
+        add("Weekly commits", analysis["commit_velocity_weekly"])
+
+    if "Contributors" in selected:
+        add("Contributors", analysis["contributors"])
+
+    if "Issues" in selected:
+        add("Issues", analysis["issues"])
+        add("Issues per month", analysis["issue_monthly"])
+        add("Open issue aging", analysis["issue_aging"])
+
+    if "Pull Requests" in selected:
+        add("Pull requests", analysis["pull_requests"])
+        add("Pull requests per month", analysis["pull_request_monthly"])
+        add("Open pull request aging", analysis["pull_request_aging"])
+
+    if "Languages" in selected:
+        add("Languages", analysis["languages"])
+
+    if "Releases" in selected:
+        add("Releases", analysis["releases"])
+        add("Release intervals", analysis["release_intervals"])
+
+    return tables
+
+
+def render_data_status(analysis, owner, repo, selected):
+
+    with card_open(
+        "data_status",
+        "Data and export",
+        "When this data was fetched, how much GitHub API allowance is left, and a workbook of every table.",
+    ):
+
+        render_html(fetched_status_html(analysis))
+        render_rate_limit_bar(analysis)
+
+        cols = st.columns([1, 1.6, 4], gap="small", vertical_alignment="center")
+
+        with cols[0]:
+            with st.container(key="atool_refresh"):
+                st.button("Refresh data", key="refresh_btn", on_click=request_refresh)
+
+        signature = (owner, repo, st.session_state.analysis_stamp, tuple(sorted(selected)))
+        ready = st.session_state.workbook_ready
+
+        with cols[1]:
+
+            if ready is not None and ready["signature"] == signature:
+                st.download_button(
+                    "Download workbook (.xlsx)",
+                    data=ready["data"],
+                    file_name=f"{export_file_stem('all-tables')}.xlsx",
+                    mime=XLSX_MIME,
+                    key="dl_all_xlsx",
+                    on_click="ignore",
+                )
+
+            elif st.button("Prepare Excel workbook", key="dl_all_xlsx_prep"):
+
+                with st.spinner("Building the workbook"):
+                    data, notes = tables_to_excel_bytes(export_tables(analysis, selected))
+
+                st.session_state.workbook_ready = {
+                    "signature": signature,
+                    "data": data,
+                    "notes": notes,
+                }
+                st.rerun()
+
+        if ready is not None and ready["signature"] == signature and ready["notes"]:
+            notice("warning", "Some tables were shortened", " ".join(ready["notes"]))
+
+
+def render_api_usage(analysis):
+
+    info = analysis.get("rate_limit") or {}
+    rows = rate_buckets(info)
+
+    section_header(
+        "API Usage and Exports",
+        "How much of GitHub's API allowance this analysis used, and how the search and export tools work.",
+        "activity",
+    )
+
+    cards = []
+
+    for label, bucket in rows:
+        cards.append({
+            "label": f"{label} Remaining",
+            "value": fmt_int(bucket["remaining"]),
+            "icon": "activity",
+            "tone": "warning" if bucket["remaining"] / bucket["limit"] < info.get("low_share", 0.10) else "success",
+            "hint": f"of {fmt_int(bucket['limit'])} · resets {fmt_reset(bucket['reset'])}",
+        })
+
+    if not rows:
+        cards.append({
+            "label": "Rate Limit",
+            "value": "Not reported",
+            "icon": "info",
+            "tone": "",
+            "hint": "GitHub sent no rate-limit headers",
+        })
+
+    cards.append({
+        "label": "Requests This Run",
+        "value": fmt_int(info.get("requests", 0)),
+        "icon": "commit",
+        "tone": "blue",
+        "hint": "Served from cache" if info.get("from_cache") else "Including retries",
+    })
+
+    cards.append({
+        "label": "Authentication",
+        "value": "Token" if info.get("authenticated") else "No token",
+        "icon": "lock",
+        "tone": "violet",
+        "hint": "GITHUB_TOKEN is set" if info.get("authenticated") else "Anonymous, lower limit",
+    })
+
+    for start in range(0, len(cards), 4):
+        kpi_grid(cards[start:start + 4])
+
+    render_methodology(
+        "rate_limit_method",
+        "How the API usage figures are read",
+        "Each figure above follows these rules.",
+        RATE_LIMIT_METHODS,
+        RATE_LIMIT_FOOT,
+    )
+
+    render_methodology(
+        "table_tools_method",
+        "How table search, filters and exports work",
+        "Applies to every table in this report.",
+        TABLE_TOOLS_METHODS,
+        TABLE_TOOLS_FOOT,
+    )
 
 
 def render_results():
@@ -3550,6 +4205,8 @@ def render_results():
             f'<span><b>Analysis window:</b> {esc(period_label)}{esc(date_detail)}</span>'
             f'</div>'
         )
+
+        render_data_status(analysis, owner, repo, selected)
 
         render_repository_overview(analysis["repository"], owner, repo)
 
@@ -3580,6 +4237,8 @@ def render_results():
             render_releases_section(analysis, owner, repo)
             render_release_cadence(analysis)
 
+        render_api_usage(analysis)
+
 
 def main():
 
@@ -3589,15 +4248,21 @@ def main():
 
     analyze_clicked = render_control_panel()
 
+    refresh_wanted = st.session_state.refresh_requested
+    st.session_state.refresh_requested = False
+
     if analyze_clicked:
         run_analysis()
+
+    elif refresh_wanted and st.session_state.analysis is not None:
+        refresh_analysis()
 
     st.write("")
 
     if st.session_state.error:
 
-        kind, message = st.session_state.error
-        render_error(kind, message)
+        kind, message, extra = st.session_state.error
+        render_error(kind, message, extra)
 
     elif st.session_state.analysis is not None:
 

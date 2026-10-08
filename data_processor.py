@@ -1,5 +1,7 @@
 import math
+import re
 from datetime import datetime, timezone
+from io import BytesIO
 
 import pandas as pd
 
@@ -2083,3 +2085,181 @@ RELEASE_CADENCE_FOOT = (
     "Cadence describes how regularly releases were published inside the window. "
     "It does not measure release quality, and repositories that do not use GitHub releases will show little or nothing here."
 )
+
+
+
+EXPORT_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+EXPORT_ILLEGAL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+EXCEL_MAX_DATA_ROWS = 1048575
+TABLE_SEARCH_MIN_ROWS = 10
+EXCEL_SHEET_NAME_LIMIT = 31
+EXCEL_SHEET_NAME_FORBIDDEN = re.compile(r"[\\/*?:\[\]]")
+
+TABLE_TOOLS_METHODS = [
+    {
+        "name": "Search and filters",
+        "summary": "Narrow a table to the rows you care about before reading or exporting it.",
+        "rules": [
+            ("Where it appears", f"Search and filters are offered on tables with at least {TABLE_SEARCH_MIN_ROWS} rows. Every table can be exported."),
+            ("Search", "Case-insensitive plain-text match, not a pattern. A row is kept when any text column, or the number column of issues and pull requests, contains the text."),
+            ("Filters", "Choosing values in a filter keeps only rows with one of those values. Leaving a filter empty applies no filter. Search and filters combine."),
+            ("Scope", "Filtering only changes what is shown and exported. The charts, KPIs and scores above are always calculated from the full data."),
+        ],
+    },
+    {
+        "name": "Exports",
+        "summary": "CSV and Excel files contain exactly the rows currently shown in that table.",
+        "rules": [
+            ("Workbook", "The workbook holds every table from the analysis, unfiltered, one sheet per table."),
+            ("Dates", "Dates are written in UTC without a time zone label, because Excel cannot store time zones."),
+            ("Text safety", "GitHub titles and messages are untrusted. Text starting with =, +, - or @ gets a leading apostrophe so spreadsheet programs do not run it as a formula, and control characters are removed."),
+            ("Size limit", f"An Excel sheet holds at most {EXCEL_MAX_DATA_ROWS:,} data rows. Larger tables are cut at that limit and the workbook says which ones."),
+        ],
+    },
+]
+
+TABLE_TOOLS_FOOT = (
+    "Exports reflect the data as it was fetched from GitHub at the time shown above. "
+    "Refresh the data to export newer information."
+)
+
+
+def _is_text_column(series):
+
+    return (
+        pd.api.types.is_string_dtype(series.dtype)
+        or pd.api.types.is_object_dtype(series.dtype)
+    )
+
+
+def filter_table(df, query="", column_values=None):
+
+    if df is None or df.empty:
+        return df
+
+    result = df
+
+    for column, wanted in (column_values or {}).items():
+
+        if column in result.columns and wanted:
+            result = result[result[column].isin(list(wanted))]
+
+    text = str(query or "").strip().casefold()
+
+    if not text or result.empty:
+        return result
+
+    mask = pd.Series(False, index=result.index)
+
+    for column in result.columns:
+
+        series = result[column]
+
+        if not (_is_text_column(series) or column == "number"):
+            continue
+
+        mask |= (
+            series.astype("string")
+            .str.casefold()
+            .str.contains(text, regex=False, na=False)
+        )
+
+    return result[mask]
+
+
+def _export_cell(value):
+
+    if isinstance(value, str):
+
+        value = EXPORT_ILLEGAL_CHARACTERS.sub("", value)
+
+        if value.startswith(EXPORT_FORMULA_PREFIXES):
+            return "'" + value
+
+    return value
+
+
+def prepare_export_frame(df):
+
+    frame = df.copy()
+
+    for column in frame.columns:
+
+        series = frame[column]
+
+        if isinstance(series.dtype, pd.DatetimeTZDtype):
+            frame[column] = series.dt.tz_convert("UTC").dt.tz_localize(None)
+
+        elif _is_text_column(series):
+            frame[column] = series.map(_export_cell)
+
+    return frame
+
+
+def dataframe_to_csv_bytes(df):
+
+    return prepare_export_frame(df).to_csv(index=False).encode("utf-8-sig")
+
+
+def _excel_sheet_name(name, used):
+
+    cleaned = EXCEL_SHEET_NAME_FORBIDDEN.sub(" ", str(name)).strip().strip("'").strip()
+    base = (cleaned or "Sheet")[:EXCEL_SHEET_NAME_LIMIT]
+    candidate = base
+    counter = 2
+
+    while candidate.lower() in used:
+        suffix = f" {counter}"
+        candidate = base[: EXCEL_SHEET_NAME_LIMIT - len(suffix)] + suffix
+        counter += 1
+
+    used.add(candidate.lower())
+
+    return candidate
+
+
+def tables_to_excel_bytes(tables):
+
+    buffer = BytesIO()
+    notes = []
+    used = set()
+    wrote = False
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+
+        for name, df in tables:
+
+            if df is None:
+                continue
+
+            frame = prepare_export_frame(df)
+
+            if len(frame) > EXCEL_MAX_DATA_ROWS:
+                notes.append(
+                    f"{name}: only the first {EXCEL_MAX_DATA_ROWS:,} of {len(frame):,} rows fit in an Excel sheet."
+                )
+                frame = frame.iloc[:EXCEL_MAX_DATA_ROWS]
+
+            frame.to_excel(
+                writer,
+                sheet_name=_excel_sheet_name(name, used),
+                index=False,
+            )
+            wrote = True
+
+        if notes:
+            pd.DataFrame({"note": notes}).to_excel(
+                writer,
+                sheet_name=_excel_sheet_name("Notes", used),
+                index=False,
+            )
+            wrote = True
+
+        if not wrote:
+            pd.DataFrame({"note": ["No tables were available to export."]}).to_excel(
+                writer,
+                sheet_name="Empty",
+                index=False,
+            )
+
+    return buffer.getvalue(), notes
