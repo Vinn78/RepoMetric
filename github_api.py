@@ -32,6 +32,8 @@ from data_processor import (
     calculate_issue_resolution,
     calculate_pull_request_health,
     calculate_release_cadence,
+    calculate_commit_heatmap,
+    empty_heatmap_matrix,
 )
 
                                                               
@@ -1575,11 +1577,18 @@ def _analyze_uncached(
                 commits_df
             )
         )
+        commit_heatmap, commit_heatmap_matrix = (
+            calculate_commit_heatmap(
+                commits_df
+            )
+        )
     else:
         commit_metrics = empty_metric_dict()
         commit_activity_trend = empty_metric_dict()
         commit_monthly_metrics = empty_metric_dict()
         commit_monthly_trend = empty_dataframe()
+        commit_heatmap = empty_metric_dict()
+        commit_heatmap_matrix = empty_heatmap_matrix()
 
     if "Contributors" in selected_analyses:
         contributor_metrics = (
@@ -1704,6 +1713,8 @@ def _analyze_uncached(
         "commit_activity_trend": commit_activity_trend,
         "commit_monthly_metrics": commit_monthly_metrics,
         "commit_monthly_trend": commit_monthly_trend,
+        "commit_heatmap": commit_heatmap,
+        "commit_heatmap_matrix": commit_heatmap_matrix,
 
         "contributor_metrics": contributor_metrics,
         "contributor_concentration": contributor_concentration,

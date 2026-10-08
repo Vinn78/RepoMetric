@@ -35,6 +35,8 @@ from data_processor import (
     TABLE_TOOLS_FOOT,
     TABLE_TOOLS_METHODS,
     dataframe_to_csv_bytes,
+    HEATMAP_FOOT,
+    HEATMAP_METHODS,
     filter_table,
     tables_to_excel_bytes,
     ISSUE_RESOLUTION_FOOT,
@@ -3055,6 +3057,156 @@ def release_interval_figure(intervals_df, median_days):
     return _style_figure(fig, legend=True)
 
 
+def commit_heatmap_figure(matrix):
+
+    days = [column for column in matrix.columns if column != "block"]
+    values = matrix[days].values.tolist()
+    labels = [["" if value == 0 else str(int(value)) for value in row] for row in values]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=values,
+            x=days,
+            y=matrix["block"].tolist(),
+            text=labels,
+            texttemplate="%{text}",
+            textfont=dict(size=12.5, color=THEME["text"]),
+            colorscale=[[0.0, "rgba(117,131,255,0.07)"], [1.0, "#7583ff"]],
+            zmin=0,
+            xgap=3,
+            ygap=3,
+            showscale=False,
+            hovertemplate="%{x}, %{y} UTC<br>%{z} commit(s)<extra></extra>",
+        )
+    )
+
+    _style_figure(fig, height=340, legend=False)
+
+    fig.update_layout(hovermode="closest")
+    fig.update_xaxes(showgrid=False, fixedrange=True)
+    fig.update_yaxes(showgrid=False, autorange="reversed", fixedrange=True, title_text="Time block (UTC)")
+
+    return fig
+
+
+def render_commit_heatmap(analysis):
+
+    insights = analysis.get("commit_heatmap") or {}
+    matrix = analysis.get("commit_heatmap_matrix")
+
+    if not insights or matrix is None or matrix.empty:
+        return
+
+    section_header(
+        "Developer Activity Heatmap",
+        "When commits are recorded, by day of the week and time of day in UTC.",
+        "calendar",
+    )
+
+    total = insights["total_commits"]
+
+    if not insights["sufficient"]:
+        notice(
+            "info",
+            "Small sample",
+            f"Only {fmt_int(total)} commit(s) are in this window, so the pattern below may be down to chance.",
+        )
+
+    ratio = insights["weekend_ratio"]
+
+    if ratio is None:
+        weekend_hint = "No weekday commits to compare with"
+    else:
+        weekend_hint = f"{ratio:.2f}x the weekday rate per day"
+
+    kpi_grid([
+        {
+            "label": "Most Active Day",
+            "value": insights["most_active_day"],
+            "icon": "calendar",
+            "tone": "violet",
+            "hint": f"{fmt_int(insights['most_active_day_commits'])} commits, {insights['most_active_day_share']:.1f}% of all",
+        },
+        {
+            "label": "Most Active Time (UTC)",
+            "value": insights["most_active_block"],
+            "icon": "clock",
+            "tone": "blue",
+            "hint": f"{fmt_int(insights['most_active_block_commits'])} commits, {insights['most_active_block_share']:.1f}% of all",
+        },
+        {
+            "label": "Peak Activity Period",
+            "value": f"{insights['peak_day']}, {insights['peak_block']}",
+            "icon": "activity",
+            "wrap_text": True,
+            "hint": f"{fmt_int(insights['peak_commits'])} commits, {insights['peak_share']:.1f}% of all",
+        },
+        {
+            "label": "Weekend Share",
+            "value": f"{insights['weekend_share']:.1f}%",
+            "icon": "percent",
+            "tone": "success",
+            "hint": weekend_hint,
+        },
+    ])
+
+    day_columns = [column for column in matrix.columns if column != "block"]
+    heatmap_config = {
+        "block": st.column_config.TextColumn("Time block (UTC)"),
+        **{
+            column: st.column_config.NumberColumn(column, format="%d")
+            for column in day_columns
+        },
+    }
+
+    visual_card(
+        "commit_heatmap",
+        "Commits by weekday and time",
+        "Darker cells mean more commits. Each row is a 4-hour block of the day in UTC.",
+        fig=commit_heatmap_figure(matrix),
+        df=matrix,
+        column_config=heatmap_config,
+        height=260,
+    )
+
+    if ratio is None:
+        split_body = (
+            f"All <strong>{fmt_int(insights['weekend_commits'])}</strong> commit(s) landed on weekends."
+        )
+    else:
+        split_body = (
+            f"<strong>{insights['weekday_share']:.1f}%</strong> of commits landed Monday to Friday "
+            f"(<strong>{insights['weekday_per_day']:.1f}</strong> per day) and "
+            f"<strong>{insights['weekend_share']:.1f}%</strong> on weekends "
+            f"(<strong>{insights['weekend_per_day']:.1f}</strong> per day)."
+        )
+
+    insight_cards([
+        {
+            "icon": "trending",
+            "title": "Peak activity period",
+            "body_html": f"The busiest slot is <strong>{esc(insights['peak_day'])}</strong> between "
+                         f"<strong>{esc(insights['peak_block'])} UTC</strong>, with "
+                         f"<strong>{fmt_int(insights['peak_commits'])} commit(s)</strong>. "
+                         f"Overall, <strong>{esc(insights['most_active_day'])}</strong> is the busiest day and "
+                         f"<strong>{esc(insights['most_active_block'])} UTC</strong> the busiest time block.",
+        },
+        {
+            "icon": "calendar",
+            "title": "Weekday versus weekend",
+            "body_html": split_body,
+        },
+    ])
+
+    render_methodology(
+        "heatmap_method",
+        "How the activity heatmap is calculated",
+        "Each figure above follows these rules.",
+        HEATMAP_METHODS,
+        HEATMAP_FOOT,
+    )
+
+
 def render_commit_velocity(analysis):
 
     velocity = analysis.get("commit_velocity") or {}
@@ -4042,6 +4194,7 @@ def export_tables(analysis, selected):
         add("Commits", commits[[c for c in ("date", "author", "message", "sha") if c in commits.columns]] if not commits.empty else commits)
         add("Monthly commits", analysis["commit_monthly_trend"])
         add("Weekly commits", analysis["commit_velocity_weekly"])
+        add("Commit activity heatmap", analysis.get("commit_heatmap_matrix"))
 
     if "Contributors" in selected:
         add("Contributors", analysis["contributors"])
@@ -4217,6 +4370,7 @@ def render_results():
 
         if "Commits" in selected:
             render_commits_section(analysis)
+            render_commit_heatmap(analysis)
             render_commit_velocity(analysis)
 
         if "Contributors" in selected:

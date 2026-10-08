@@ -2263,3 +2263,146 @@ def tables_to_excel_bytes(tables):
             )
 
     return buffer.getvalue(), notes
+
+HEATMAP_DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+HEATMAP_DAY_NAMES = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+HEATMAP_BLOCK_HOURS = 4
+HEATMAP_BLOCK_LABELS = [
+    f"{start:02d}:00-{start + HEATMAP_BLOCK_HOURS:02d}:00"
+    for start in range(0, 24, HEATMAP_BLOCK_HOURS)
+]
+HEATMAP_MIN_COMMITS = 20
+HEATMAP_WEEKEND_DAYS = 2
+
+
+def empty_heatmap_matrix():
+    return pd.DataFrame(columns=["block"] + HEATMAP_DAY_LABELS)
+
+
+def calculate_commit_heatmap(commits_df):
+    dates = _dates_from(commits_df, "date")
+
+    if dates.empty:
+        return {}, empty_heatmap_matrix()
+
+    day_positions = dates.dt.weekday.to_numpy()
+    block_positions = (dates.dt.hour // HEATMAP_BLOCK_HOURS).to_numpy()
+
+    counts = [
+        [0] * len(HEATMAP_DAY_LABELS)
+        for _ in HEATMAP_BLOCK_LABELS
+    ]
+
+    for block, day in zip(block_positions, day_positions):
+        counts[int(block)][int(day)] += 1
+
+    matrix = pd.DataFrame(counts, columns=HEATMAP_DAY_LABELS)
+    matrix.insert(0, "block", HEATMAP_BLOCK_LABELS)
+
+    total = int(len(dates))
+
+    day_totals = [
+        sum(row[day] for row in counts)
+        for day in range(len(HEATMAP_DAY_LABELS))
+    ]
+    block_totals = [sum(row) for row in counts]
+
+    busiest_day = day_totals.index(max(day_totals))
+    busiest_block = block_totals.index(max(block_totals))
+
+    peak_value = max(max(row) for row in counts)
+    peak_block = next(
+        index for index, row in enumerate(counts) if max(row) == peak_value
+    )
+    peak_day = counts[peak_block].index(peak_value)
+
+    weekend_count = len(HEATMAP_DAY_LABELS) - 5
+    weekday_commits = int(sum(day_totals[:5]))
+    weekend_commits = int(sum(day_totals[5:]))
+
+    weekday_per_day = weekday_commits / 5
+    weekend_per_day = weekend_commits / weekend_count
+
+    weekend_ratio = (
+        weekend_per_day / weekday_per_day
+        if weekday_per_day > 0
+        else None
+    )
+
+    insights = {
+        "total_commits": total,
+        "sufficient": total >= HEATMAP_MIN_COMMITS,
+        "most_active_day": HEATMAP_DAY_NAMES[busiest_day],
+        "most_active_day_commits": int(day_totals[busiest_day]),
+        "most_active_day_share": day_totals[busiest_day] / total * 100.0,
+        "most_active_block": HEATMAP_BLOCK_LABELS[busiest_block],
+        "most_active_block_commits": int(block_totals[busiest_block]),
+        "most_active_block_share": block_totals[busiest_block] / total * 100.0,
+        "peak_day": HEATMAP_DAY_NAMES[peak_day],
+        "peak_block": HEATMAP_BLOCK_LABELS[peak_block],
+        "peak_commits": int(peak_value),
+        "peak_share": peak_value / total * 100.0,
+        "weekday_commits": weekday_commits,
+        "weekend_commits": weekend_commits,
+        "weekday_share": weekday_commits / total * 100.0,
+        "weekend_share": weekend_commits / total * 100.0,
+        "weekday_per_day": weekday_per_day,
+        "weekend_per_day": weekend_per_day,
+        "weekend_ratio": weekend_ratio,
+        "max_cell": int(peak_value),
+    }
+
+    return insights, matrix
+
+
+HEATMAP_METHODS = [
+    {
+        "name": "Heatmap cells",
+        "summary": "Each cell counts the commits made on one day of the week within one time block.",
+        "rules": [
+            ("Time basis", "Commit author dates converted to UTC. Local working hours of contributors in other time zones are therefore not reflected, and commits from different zones are mixed into the same blocks."),
+            ("Time blocks", f"The day is split into {24 // HEATMAP_BLOCK_HOURS} blocks of {HEATMAP_BLOCK_HOURS} hours each, starting at 00:00 UTC."),
+            ("Days", "Monday to Sunday, taken from the UTC date of each commit."),
+            ("Included commits", "Every commit in the selected analysis window. Commits without a valid date are skipped."),
+        ],
+    },
+    {
+        "name": "Most active day and time block",
+        "summary": "The weekday and the time block with the most commits overall.",
+        "rules": [
+            ("Most active day", "The weekday with the highest total across all time blocks."),
+            ("Most active time block", "The time block with the highest total across all weekdays."),
+            ("Peak activity period", "The single weekday and time block combination with the most commits."),
+            ("Ties", "The earliest weekday or time block wins."),
+        ],
+    },
+    {
+        "name": "Weekday versus weekend",
+        "summary": "How commit activity splits between Monday to Friday and Saturday and Sunday.",
+        "rules": [
+            ("Share", "Commits on that part of the week divided by all commits in the window."),
+            ("Per day average", "Weekday commits divided by 5 and weekend commits divided by 2, so the two can be compared fairly. Weekend days make up 2 of 7 days, so a weekend share near 28.6% means activity is spread evenly across the week."),
+            ("Weekend vs weekday rate", "Average commits per weekend day divided by average commits per weekday."),
+        ],
+    },
+    {
+        "name": "Small samples",
+        "summary": "Patterns from few commits are easily the result of chance.",
+        "rules": [
+            ("Minimum", f"With fewer than {HEATMAP_MIN_COMMITS} commits the heatmap is still drawn but is flagged as a small sample."),
+        ],
+    },
+]
+
+HEATMAP_FOOT = (
+    "The heatmap describes when commits were recorded, not when people worked or how much effort was spent. "
+    "It uses the time a commit was authored, which a developer can set or rewrite."
+)
