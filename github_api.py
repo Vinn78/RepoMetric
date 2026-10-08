@@ -23,6 +23,7 @@ from data_processor import (
     calculate_contributor_metrics,
     calculate_contributor_concentration,
     calculate_release_metrics,
+    calculate_health_score,
 )
 
                                                               
@@ -1090,6 +1091,17 @@ def analyze_repository(
     else:
         release_metrics = empty_metric_dict()
 
+    health_score = calculate_health_score(
+        commits_df,
+        contributors_df,
+        issues_df,
+        pull_requests_df,
+        releases_df,
+        selected_analyses,
+        period_start=since,
+        now=until,
+    )
+
     return {
         "repository": repository,
 
@@ -1117,6 +1129,8 @@ def analyze_repository(
         "pull_request_metrics": pull_request_metrics,
 
         "release_metrics": release_metrics,
+
+        "health_score": health_score,
     }
 
 

@@ -86,6 +86,14 @@ ANALYSIS_OPTIONS = [
     "Releases"
 ]
 
+HEALTH_ICONS = {
+    "activity": "activity",
+    "collaboration": "users",
+    "issues": "issue",
+    "pull_requests": "pull_request",
+    "releases": "tag",
+}
+
 ANALYSIS_META = {
     "Commits": {
         "slug": "commits",
@@ -1267,6 +1275,16 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-pill--warn { color: #efc27e; background: rgba(227,169,79,0.12); border: 1px solid rgba(227,169,79,0.25); }
 .gs-pill--muted { color: var(--gs-text-2); background: rgba(255,255,255,0.05); border: 1px solid var(--gs-border); }
 
+.gs-method { display: flex; flex-direction: column; }
+.gs-method__row { display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid var(--gs-border); }
+.gs-method__row:first-child { border-top: 0; padding-top: 2px; }
+.gs-method__name { flex: 0 0 150px; font-size: 0.92rem; font-weight: 600; color: var(--gs-text); }
+.gs-method__weight { display: block; margin-top: 2px; font-size: 0.78rem; font-weight: 400; color: var(--gs-text-3); }
+.gs-method__body { min-width: 0; flex: 1; font-size: 0.86rem; line-height: 1.5; color: var(--gs-text-2); }
+.gs-method__rule { margin-top: 4px; color: var(--gs-text-3); overflow-wrap: anywhere; }
+.gs-method__rule b { font-weight: 500; color: var(--gs-text-2); }
+.gs-method__foot { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--gs-border); font-size: 0.84rem; color: var(--gs-text-3); }
+
 
 .stApp iframe { border: 0; border-radius: 12px; color-scheme: dark; }
 
@@ -1309,6 +1327,8 @@ div[data-testid="stSelectboxVirtualDropdown"] [role="option"] * {
 
 @media (max-width: 520px) {
     .gs-hero { align-items: flex-start; }
+    .gs-method__row { flex-direction: column; gap: 6px; }
+    .gs-method__name { flex: none; }
     .gs-lede { display: none; }
     div.st-key-module_grid { grid-template-columns: 1fr; }
 }
@@ -1835,6 +1855,247 @@ def releases_timeline_figure(releases_df):
     fig.update_xaxes(title_text=None)
 
     return _style_figure(fig, height=170, legend=False)
+
+def health_color(score):
+
+    if score >= 75:
+        return THEME["success"]
+
+    if score >= 50:
+        return THEME["warning"]
+
+    return THEME["danger"]
+
+
+def health_tone(score):
+
+    if score is None:
+        return ""
+
+    if score >= 75:
+        return "success"
+
+    if score >= 50:
+        return "blue"
+
+    return "warning"
+
+
+def health_components_figure(components):
+
+    scored = [item for item in components if item["available"]][::-1]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=[item["score"] for item in scored],
+        y=[item["name"] for item in scored],
+        orientation="h",
+        marker=dict(
+            color=[health_color(item["score"]) for item in scored],
+            line=dict(width=0),
+        ),
+        text=[f"{item['score']:.0f}" for item in scored],
+        textposition="outside",
+        cliponaxis=False,
+        textfont=dict(color=THEME["text"], size=13),
+        hovertemplate="<b>%{y}</b><br>Score %{x:.0f} / 100<extra></extra>",
+    ))
+
+    fig.update_yaxes(title_text=None)
+    fig.update_xaxes(
+        title_text="Score (0-100)",
+        range=[0, 112],
+        tickvals=[0, 25, 50, 75, 100],
+    )
+
+    height = max(240, 54 * len(scored) + 70)
+
+    return _style_figure(fig, height=height, legend=False)
+
+
+def health_breakdown_table(components):
+
+    rows = []
+
+    for item in components:
+
+        applied = (
+            f"{item['effective_weight']:.0f}%"
+            if item["available"] and item["effective_weight"] is not None
+            else "0%"
+        )
+        base = f"{item['weight']}%"
+        component_score = item["score"] if item["available"] else None
+
+        if not item["inputs"]:
+
+            rows.append({
+                "component": item["name"],
+                "component_score": component_score,
+                "metric": "Window result" if item["available"] else "Not scored",
+                "value": item["reason"] or "Not available",
+                "metric_score": component_score,
+                "rule": "",
+                "base_weight": base,
+                "applied_weight": applied,
+            })
+
+            continue
+
+        for entry in item["inputs"]:
+
+            rows.append({
+                "component": item["name"],
+                "component_score": component_score,
+                "metric": entry["label"],
+                "value": entry["value"],
+                "metric_score": entry["score"],
+                "rule": entry["rule"],
+                "base_weight": base,
+                "applied_weight": applied,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def render_health_methodology(components):
+
+    rows = []
+
+    for item in components:
+
+        rules = "".join(
+            f'<div class="gs-method__rule"><b>{esc(label)}:</b> {esc(rule)}</div>'
+            for label, rule in item["rules"]
+        )
+
+        status = ""
+
+        if not item["available"]:
+            status = (
+                f'<div class="gs-method__rule">'
+                f'<span class="gs-pill gs-pill--warn">Not scored</span> {esc(item["reason"])}'
+                f'</div>'
+            )
+
+        rows.append(f"""
+        <div class="gs-method__row">
+            <div class="gs-method__name">{esc(item['name'])}
+                <span class="gs-method__weight">Base weight {item['weight']}%</span>
+            </div>
+            <div class="gs-method__body">{esc(item['summary'])}{rules}{status}</div>
+        </div>
+        """)
+
+    with card_open(
+        "health_method",
+        "How the score is calculated",
+        "Each component is scored 0-100 from the rules below. The overall score is the weighted average of the components that could be scored.",
+    ):
+        render_html(f"""
+        <div class="gs-method">
+            {''.join(rows)}
+            <div class="gs-method__foot">
+                Overall bands: Healthy is 75 or above, Moderate is 50 to 74, Needs attention is below 50.
+                Components without data are left out and the remaining weights are rescaled to 100%.
+                All inputs come from the selected analysis window.
+            </div>
+        </div>
+        """)
+
+
+def render_health_score(analysis):
+
+    health = analysis.get("health_score")
+
+    if not health:
+        return
+
+    section_header(
+        "Repository Health Score",
+        "A 0-100 score built from activity, collaboration, issue, pull request and release signals, with every input shown.",
+        "activity",
+    )
+
+    components = health["components"]
+
+    if health["overall"] is None:
+
+        empty_state(
+            "Health score unavailable",
+            "Select at least one of Commits, Contributors, Issues, Pull Requests or Releases so there is data to score.",
+            "activity",
+        )
+
+        return
+
+    def component_card(item):
+
+        if item["available"]:
+            value = f"{item['score']:.0f}"
+            hint = f"Applied weight {item['effective_weight']:.0f}%"
+        else:
+            value = "N/A"
+            hint = "Not scored"
+
+        return {
+            "label": item["name"],
+            "value": value,
+            "icon": HEALTH_ICONS[item["key"]],
+            "tone": health_tone(item["score"]) if item["available"] else "",
+            "hint": hint,
+        }
+
+    overall_card = {
+        "label": "Overall Health",
+        "value": f"{health['overall']} / 100",
+        "icon": "trending",
+        "tone": health_tone(health["overall"]),
+        "hint": f"{health['label']} · {health['available_count']} of {health['total_count']} components scored",
+    }
+
+    cards = [component_card(item) for item in components]
+
+    kpi_grid([overall_card] + cards[:2])
+    kpi_grid(cards[2:])
+
+    unscored = [item for item in components if not item["available"]]
+
+    if unscored:
+
+        details = " ".join(f"{item['name']}: {item['reason']}" for item in unscored)
+
+        notice(
+            "info",
+            "Some components were not scored",
+            f"The overall score uses {health['available_count']} of {health['total_count']} components, "
+            f"with the remaining weights rescaled to 100%. {details}",
+        )
+
+    scored = [item for item in components if item["available"]]
+
+    visual_card(
+        "health_components",
+        "Component scores",
+        "Score of each component behind the overall health score, and the full breakdown table.",
+        fig=health_components_figure(components) if scored else None,
+        df=health_breakdown_table(components),
+        column_config={
+            "component": st.column_config.TextColumn("Component"),
+            "component_score": st.column_config.NumberColumn("Component score", format="%.0f"),
+            "metric": st.column_config.TextColumn("Metric"),
+            "value": st.column_config.TextColumn("Value", width="medium"),
+            "metric_score": st.column_config.NumberColumn("Metric score", format="%.0f"),
+            "rule": st.column_config.TextColumn("How it is scored", width="large"),
+            "base_weight": st.column_config.TextColumn("Base weight"),
+            "applied_weight": st.column_config.TextColumn("Applied weight"),
+        },
+        height=360,
+    )
+
+    render_health_methodology(components)
+
 
 def render_repository_overview(repository, owner, repo):
 
@@ -2583,6 +2844,9 @@ def render_results():
         )
 
         render_repository_overview(analysis["repository"], owner, repo)
+
+        if selected:
+            render_health_score(analysis)
 
         if "Commits" in selected:
             render_commits_section(analysis)
