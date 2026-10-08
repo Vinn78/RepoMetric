@@ -3155,6 +3155,377 @@ TIMELINE_FOOT = (
 )
 
 
+ANOMALY_BASELINE_WEEKS = 8
+ANOMALY_MIN_BASELINE_WEEKS = 4
+ANOMALY_SPIKE_RATIO = 2.0
+ANOMALY_SPIKE_SIGMA = 2.0
+ANOMALY_INACTIVE_WEEKS = 2
+ANOMALY_INACTIVE_MIN_BASELINE = 3
+ANOMALY_DROP_RATIO = 0.5
+ANOMALY_DROP_MIN_BASELINE = 4
+ANOMALY_RECENT_WEEKS = 4
+ANOMALY_SERIES = [
+    {
+        "key": "commits",
+        "required": "Commits",
+        "name": "Commit activity",
+        "subject": "Commit volume",
+        "unit": "commits",
+        "column": "date",
+        "author_column": None,
+        "min_spike": 5,
+        "inactivity": True,
+        "drop": False,
+    },
+    {
+        "key": "issues",
+        "required": "Issues",
+        "name": "Issue activity",
+        "subject": "Issue volume",
+        "unit": "issues opened",
+        "column": "created_at",
+        "author_column": None,
+        "min_spike": 5,
+        "inactivity": True,
+        "drop": False,
+    },
+    {
+        "key": "pull_requests",
+        "required": "Pull Requests",
+        "name": "PR activity",
+        "subject": "Pull request volume",
+        "unit": "pull requests opened",
+        "column": "created_at",
+        "author_column": None,
+        "min_spike": 5,
+        "inactivity": True,
+        "drop": False,
+    },
+    {
+        "key": "contributors",
+        "required": "Commits",
+        "name": "Contributor activity",
+        "subject": "Active contributor count",
+        "unit": "active contributors",
+        "column": "date",
+        "author_column": "author",
+        "min_spike": 4,
+        "inactivity": False,
+        "drop": True,
+    },
+]
+ANOMALY_LABELS = {
+    "spike": "Spike",
+    "drop": "Drop",
+    "inactive": "Inactive period",
+}
+
+
+def _anomaly_day(stamp):
+
+    return f"{stamp.day} {stamp.strftime('%b %Y')}"
+
+
+def _anomaly_weekly_counts(df, spec):
+
+    empty = pd.Series([], dtype="int64")
+
+    if df is None or df.empty or spec["column"] not in df.columns:
+        return empty
+
+    frame = pd.DataFrame({"stamp": _utc_series(df[spec["column"]])})
+
+    author_column = spec["author_column"]
+
+    if author_column:
+
+        if author_column not in df.columns:
+            return empty
+
+        frame["author"] = df[author_column].values
+
+    frame = frame.dropna(subset=["stamp"])
+
+    if frame.empty:
+        return empty
+
+    day = frame["stamp"].dt.normalize()
+    frame["week"] = day - pd.to_timedelta(day.dt.weekday, unit="D")
+
+    if author_column:
+        return frame.groupby("week")["author"].nunique()
+
+    return frame.groupby("week").size()
+
+
+def _anomaly_week_starts(counts, period_start, last_week):
+
+    if counts.empty:
+        return None
+
+    first_week = counts.index.min()
+    floor = _utc_stamp(period_start)
+
+    if floor is not None:
+
+        floor_week = _week_floor(floor)
+
+        if floor_week < floor:
+            floor_week = floor_week + pd.Timedelta(days=7)
+
+        first_week = max(first_week, floor_week)
+
+    if first_week > last_week:
+        return None
+
+    return pd.date_range(first_week, last_week, freq="7D")
+
+
+def _anomaly_record(spec, kind, start, weeks, value, base, ongoing, recent):
+
+    mean = float(base.mean())
+    std = float(base.std(ddof=1)) if len(base) > 1 else 0.0
+    ratio = value / mean if mean > 0 else None
+    sigma = (value - mean) / std if std > 0 else None
+    day = _anomaly_day(start)
+
+    if kind == "spike" and ratio is not None:
+        sentence = (
+            f"{spec['subject']} was {ratio:.1f}\u00d7 the recent weekly average "
+            f"({int(value)} vs {mean:.1f}) in the week of {day}."
+        )
+    elif kind == "spike":
+        sentence = (
+            f"{spec['subject']} reached {int(value)} in the week of {day}, "
+            f"after no activity in the previous {len(base)} weeks."
+        )
+    elif kind == "drop":
+        sentence = (
+            f"{spec['subject']} fell to {int(value)} from a recent weekly average "
+            f"of {mean:.1f} in the week of {day}."
+        )
+    else:
+        tail = (
+            "Still inactive as of the latest complete week."
+            if ongoing
+            else "Activity later resumed."
+        )
+        sentence = (
+            f"No {spec['unit']} for {weeks} consecutive weeks starting {day}, "
+            f"against a recent average of {mean:.1f} per week. {tail}"
+        )
+
+    return {
+        "kind": kind,
+        "label": ANOMALY_LABELS[kind],
+        "series": spec["key"],
+        "name": spec["name"],
+        "subject": spec["subject"],
+        "unit": spec["unit"],
+        "week_start": start,
+        "week_end": start + pd.Timedelta(days=7 * weeks - 1),
+        "weeks": weeks,
+        "value": int(value),
+        "baseline_mean": mean,
+        "ratio": ratio,
+        "sigma": sigma,
+        "ongoing": ongoing,
+        "recent": recent,
+        "sentence": sentence,
+    }
+
+
+def _anomaly_scan(spec, weeks, values):
+
+    total = len(values)
+    recent_from = total - ANOMALY_RECENT_WEEKS
+    baseline_means = [float("nan")] * total
+    flags = [""] * total
+    found = []
+
+    for i in range(ANOMALY_MIN_BASELINE_WEEKS, total):
+
+        base = values[max(0, i - ANOMALY_BASELINE_WEEKS):i]
+        mean = float(base.mean())
+        std = float(base.std(ddof=1))
+        value = values[i]
+        baseline_means[i] = mean
+
+        is_spike = (
+            value >= spec["min_spike"]
+            and value >= ANOMALY_SPIKE_RATIO * mean
+            and value >= mean + ANOMALY_SPIKE_SIGMA * std
+        )
+
+        is_drop = (
+            spec["drop"]
+            and mean >= ANOMALY_DROP_MIN_BASELINE
+            and value <= ANOMALY_DROP_RATIO * mean
+            and value <= mean - ANOMALY_SPIKE_SIGMA * std
+        )
+
+        if is_spike:
+            flags[i] = "spike"
+            found.append(_anomaly_record(
+                spec, "spike", weeks[i], 1, value, base, False, i >= recent_from,
+            ))
+
+        elif is_drop:
+            flags[i] = "drop"
+            found.append(_anomaly_record(
+                spec, "drop", weeks[i], 1, value, base, False, i >= recent_from,
+            ))
+
+    if spec["inactivity"]:
+
+        i = ANOMALY_MIN_BASELINE_WEEKS
+
+        while i < total:
+
+            if values[i] != 0:
+                i += 1
+                continue
+
+            j = i
+
+            while j < total and values[j] == 0:
+                j += 1
+
+            length = j - i
+            base = values[max(0, i - ANOMALY_BASELINE_WEEKS):i]
+
+            if (
+                length >= ANOMALY_INACTIVE_WEEKS
+                and base.mean() >= ANOMALY_INACTIVE_MIN_BASELINE
+            ):
+
+                for k in range(i, j):
+                    flags[k] = "inactive"
+
+                found.append(_anomaly_record(
+                    spec, "inactive", weeks[i], length, 0, base,
+                    j == total, j - 1 >= recent_from,
+                ))
+
+            i = j
+
+    weekly = pd.DataFrame({
+        "week_start": weeks,
+        "value": [int(value) for value in values],
+        "baseline_mean": baseline_means,
+        "flag": flags,
+    })
+
+    return found, weekly
+
+
+def calculate_anomaly_detection(
+    commits_df,
+    issues_df,
+    pull_requests_df,
+    selected_analyses,
+    period_start=None,
+    now=None,
+):
+
+    selected = set(selected_analyses or [])
+    frames = {
+        "commits": commits_df,
+        "issues": issues_df,
+        "pull_requests": pull_requests_df,
+        "contributors": commits_df,
+    }
+
+    last_week = _week_floor(_utc_now(now)) - pd.Timedelta(days=7)
+
+    anomalies = []
+    series = []
+    weekly = {}
+
+    for spec in ANOMALY_SERIES:
+
+        if spec["required"] not in selected:
+            continue
+
+        counts = _anomaly_weekly_counts(frames[spec["key"]], spec)
+        weeks = _anomaly_week_starts(counts, period_start, last_week)
+
+        found = []
+
+        if weeks is not None:
+
+            values = (
+                counts.reindex(weeks, fill_value=0)
+                .to_numpy(dtype="float64")
+            )
+
+            found, table = _anomaly_scan(spec, weeks, values)
+            weekly[spec["key"]] = table
+
+        week_total = 0 if weeks is None else len(weeks)
+
+        series.append({
+            "key": spec["key"],
+            "name": spec["name"],
+            "subject": spec["subject"],
+            "unit": spec["unit"],
+            "weeks": week_total,
+            "evaluated_weeks": max(0, week_total - ANOMALY_MIN_BASELINE_WEEKS),
+            "anomaly_count": len(found),
+        })
+
+        anomalies.extend(found)
+
+    anomalies.sort(key=lambda item: (item["week_end"], item["week_start"]), reverse=True)
+
+    table_rows = [
+        {
+            "week_start": item["week_start"],
+            "series": item["name"],
+            "type": item["label"],
+            "weeks": item["weeks"],
+            "observed": item["value"],
+            "recent_average": round(item["baseline_mean"], 1),
+            "ratio": None if item["ratio"] is None else round(item["ratio"], 2),
+            "description": item["sentence"],
+        }
+        for item in anomalies
+    ]
+
+    return {
+        "anomalies": anomalies,
+        "recent": [item for item in anomalies if item["recent"]],
+        "series": series,
+        "weekly": weekly,
+        "table": pd.DataFrame(table_rows),
+        "evaluated": any(item["evaluated_weeks"] > 0 for item in series),
+        "latest_complete_week": last_week,
+        "recent_weeks": ANOMALY_RECENT_WEEKS,
+    }
+
+
+ANOMALY_METHODS = [
+    {
+        "name": "How anomalies are found",
+        "summary": "Activity is counted per UTC calendar week (Monday start) and each week is compared with the weeks before it. No machine learning is used.",
+        "rules": [
+            ("Weeks", "Only complete weeks are judged. The current, unfinished week is left out so a half-finished week is never flagged as a drop."),
+            ("Baseline", f"The previous {ANOMALY_BASELINE_WEEKS} weeks. A week is judged only when at least {ANOMALY_MIN_BASELINE_WEEKS} earlier weeks exist."),
+            ("Spike", f"Commits, issues opened and pull requests opened are flagged when a week is at least {ANOMALY_SPIKE_RATIO:.0f}\u00d7 the baseline average and at least {ANOMALY_SPIKE_SIGMA:.0f} standard deviations above it, with a minimum of 5 events so tiny counts never trigger."),
+            ("Inactive period", f"Flagged when {ANOMALY_INACTIVE_WEEKS} or more consecutive weeks have no commits, issues or pull requests while the weeks before averaged at least {ANOMALY_INACTIVE_MIN_BASELINE} per week."),
+            ("Contributor change", f"Distinct commit authors per week. A rise uses the spike rule with a minimum of 4 authors. A fall is flagged when the count is at most {ANOMALY_DROP_RATIO * 100:.0f}% of a baseline average of at least {ANOMALY_DROP_MIN_BASELINE} and {ANOMALY_SPIKE_SIGMA:.0f} standard deviations below it."),
+            ("Recent", f"An anomaly counts as recent when it falls within the last {ANOMALY_RECENT_WEEKS} complete weeks."),
+            ("Windows", "For a selected period, weeks that start before the period are skipped. Short periods may not have enough weeks to be judged."),
+        ],
+    },
+]
+
+ANOMALY_FOOT = (
+    "A flagged week is unusual relative to its own recent history, not necessarily a problem. "
+    "Releases, imports, bulk edits or holidays can all explain a spike or a quiet stretch."
+)
+
+
 SNAPSHOT_AREAS = [
     ("activity", "Activity", ("High", "Medium", "Low")),
     ("collaboration", "Collaboration", ("High", "Medium", "Low")),

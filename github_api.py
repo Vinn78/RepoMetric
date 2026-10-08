@@ -30,6 +30,7 @@ from data_processor import (
     calculate_health_score,
     calculate_trend_detection,
     calculate_repository_timeline,
+    calculate_anomaly_detection,
     build_contributor_leaderboard,
     calculate_commit_velocity,
     calculate_issue_resolution,
@@ -1776,6 +1777,15 @@ def _analyze_uncached(
         selected_analyses,
     )
 
+    anomaly_detection = calculate_anomaly_detection(
+        commits_df,
+        issues_df,
+        pull_requests_df,
+        selected_analyses,
+        period_start=since,
+        now=until,
+    )
+
     _stage_finish("metrics", True)
 
     return {
@@ -1826,6 +1836,7 @@ def _analyze_uncached(
         "health_score": health_score,
         "trend_detection": trend_detection,
         "repository_timeline": repository_timeline,
+        "anomaly_detection": anomaly_detection,
     }
 
 

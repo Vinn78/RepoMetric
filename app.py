@@ -39,6 +39,11 @@ from data_processor import (
     TABLE_FILTER_MAX_OPTIONS,
     TREND_FOOT,
     TREND_METHODS,
+    ANOMALY_BASELINE_WEEKS,
+    ANOMALY_FOOT,
+    ANOMALY_LABELS,
+    ANOMALY_METHODS,
+    ANOMALY_MIN_BASELINE_WEEKS,
     TIMELINE_FOOT,
     TIMELINE_METHODS,
     TREND_MIN_EVENTS,
@@ -5322,6 +5327,207 @@ def render_repository_timeline(analysis):
     )
 
 
+ANOMALY_MAX_BANNERS = 3
+
+
+def anomaly_figure(weekly_df, unit):
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=weekly_df["week_start"], y=weekly_df["value"],
+        mode="lines+markers",
+        name=f"Weekly {unit}",
+        line=dict(color=CHART_COLORS[0], width=2.2),
+        marker=dict(size=5),
+        fill="tozeroy", fillcolor="rgba(117,131,255,0.10)",
+        hovertemplate="<b>%{y:,}</b> " + unit + "<extra></extra>",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=weekly_df["week_start"], y=weekly_df["baseline_mean"],
+        mode="lines",
+        name=f"Average of previous {ANOMALY_BASELINE_WEEKS} weeks",
+        line=dict(color=CHART_COLORS[7], width=1.6, dash="dash"),
+        connectgaps=False,
+        hovertemplate="%{y:.1f} recent average<extra></extra>",
+    ))
+
+    marks = {
+        "spike": ("Spike", THEME["warning"], "diamond"),
+        "drop": ("Drop", THEME["danger"], "triangle-down"),
+        "inactive": ("Inactive week", THEME["danger"], "x"),
+    }
+
+    for flag, (label, color, symbol) in marks.items():
+
+        flagged = weekly_df[weekly_df["flag"] == flag]
+
+        if flagged.empty:
+            continue
+
+        fig.add_trace(go.Scatter(
+            x=flagged["week_start"], y=flagged["value"],
+            mode="markers",
+            name=label,
+            marker=dict(
+                symbol=symbol,
+                size=13,
+                color=color,
+                line=dict(color=THEME["surface"], width=1.5),
+            ),
+            hovertemplate=f"<b>{label}</b><extra></extra>",
+        ))
+
+    fig.update_xaxes(title_text="Week starting")
+    fig.update_yaxes(title_text=unit.capitalize(), rangemode="tozero")
+
+    return _style_figure(fig, height=360, legend=True)
+
+
+def render_anomaly_detection(analysis):
+
+    result = analysis.get("anomaly_detection") or {}
+    series = result.get("series") or []
+
+    if not series:
+        return
+
+    section_header(
+        "Anomaly Detection",
+        "Weeks where commit, issue, pull request or contributor activity was unusual compared with the repository's recent history.",
+        "alert",
+    )
+
+    anomalies = result["anomalies"]
+    recent = result["recent"]
+    evaluated = result["evaluated"]
+    recent_weeks = result["recent_weeks"]
+    weeks_evaluated = max((item["evaluated_weeks"] for item in series), default=0)
+
+    if recent:
+        status_value, status_tone = "Unusual activity", "warning"
+        status_hint = f"{len(recent)} in the last {recent_weeks} weeks"
+    elif evaluated:
+        status_value, status_tone = "Normal", "success"
+        status_hint = f"Last {recent_weeks} weeks look typical"
+    else:
+        status_value, status_tone = "Not enough data", ""
+        status_hint = f"Needs more than {ANOMALY_MIN_BASELINE_WEEKS} complete weeks"
+
+    if anomalies:
+        latest = anomalies[0]
+        latest_value = fmt_date(latest["week_start"])
+        latest_hint = f"{latest['label']} · {latest['name']}"
+    else:
+        latest_value, latest_hint = "None", "No anomalies found"
+
+    kpi_grid([
+        {"label": "Status", "value": status_value, "icon": "alert" if recent else "check", "tone": status_tone, "hint": status_hint},
+        {"label": "Anomalies Found", "value": fmt_int(len(anomalies)), "icon": "trending", "tone": "blue", "hint": f"Across {fmt_int(weeks_evaluated)} weeks evaluated"},
+        {"label": "Latest Anomaly", "value": latest_value, "icon": "calendar", "tone": "violet", "hint": latest_hint},
+        {"label": "Baseline", "value": f"{ANOMALY_BASELINE_WEEKS} weeks", "icon": "clock", "tone": "blue", "hint": "Previous weeks used for comparison"},
+    ])
+
+    if recent:
+
+        for item in recent[:ANOMALY_MAX_BANNERS]:
+            notice("warning", "Unusual activity detected", item["sentence"])
+
+        extra = len(recent) - ANOMALY_MAX_BANNERS
+
+        if extra > 0:
+            render_html(
+                f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+                f'<span>+{fmt_int(extra)} more recent anomalies are listed below.</span></div>'
+            )
+
+    elif evaluated:
+        notice(
+            "success",
+            "No unusual activity",
+            f"The last {recent_weeks} complete weeks are within the normal range of the weeks before them.",
+        )
+
+    else:
+        notice(
+            "info",
+            "Not enough history",
+            f"Anomaly detection needs more than {ANOMALY_MIN_BASELINE_WEEKS} complete weeks of data. Try a longer analysis window.",
+        )
+
+    weekly = result["weekly"]
+    options = [item["key"] for item in series if item["key"] in weekly]
+
+    if options:
+
+        names = {item["key"]: item for item in series}
+
+        if len(options) > 1:
+            chosen = st.radio(
+                "Activity series",
+                options,
+                format_func=lambda key: names[key]["name"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key=f"anomaly_series_{'_'.join(options)}",
+            )
+        else:
+            chosen = options[0]
+
+        spec = names[chosen]
+        weekly_df = weekly[chosen]
+        weekly_table = weekly_df.sort_values("week_start", ascending=False).copy()
+        weekly_table["flag"] = weekly_table["flag"].map(
+            lambda flag: ANOMALY_LABELS.get(flag, "")
+        )
+
+        visual_card(
+            "anomaly_weekly",
+            f"Weekly {spec['unit']}",
+            "Each point is one complete week. Marked weeks were flagged against the dashed recent average.",
+            fig=anomaly_figure(weekly_df, spec["unit"]),
+            df=weekly_table,
+            column_config={
+                "week_start": st.column_config.DatetimeColumn("Week starting", format="D MMM YYYY"),
+                "value": st.column_config.NumberColumn(spec["unit"].capitalize(), format="%d"),
+                "baseline_mean": st.column_config.NumberColumn("Recent average", format="%.1f"),
+                "flag": st.column_config.TextColumn("Flag"),
+            },
+            height=360,
+        )
+
+    if anomalies:
+
+        with card_open(
+            "anomaly_history",
+            "Flagged weeks",
+            "Every anomaly found in the analysis window, newest first.",
+        ):
+            styled_dataframe(
+                result["table"],
+                column_config={
+                    "week_start": st.column_config.DatetimeColumn("Week starting", format="D MMM YYYY"),
+                    "series": st.column_config.TextColumn("Series"),
+                    "type": st.column_config.TextColumn("Type"),
+                    "weeks": st.column_config.NumberColumn("Weeks", format="%d"),
+                    "observed": st.column_config.NumberColumn("Observed", format="%d"),
+                    "recent_average": st.column_config.NumberColumn("Recent average", format="%.1f"),
+                    "ratio": st.column_config.NumberColumn("Times average", format="%.1fx"),
+                    "description": st.column_config.TextColumn("What happened", width="large"),
+                },
+                height=min(420, 38 * len(result["table"]) + 40),
+            )
+
+    render_methodology(
+        "anomaly_method",
+        "How anomalies are detected",
+        "Each flag above follows these rules.",
+        ANOMALY_METHODS,
+        ANOMALY_FOOT,
+    )
+
+
 def render_results():
 
     analysis = st.session_state.analysis
@@ -5361,6 +5567,9 @@ def render_results():
 
         if selected & {"Commits", "Issues", "Pull Requests", "Releases"}:
             render_repository_timeline(analysis)
+
+        if selected & {"Commits", "Issues", "Pull Requests"}:
+            render_anomaly_detection(analysis)
 
         if "Commits" in selected:
             render_commits_section(analysis)
