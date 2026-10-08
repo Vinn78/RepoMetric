@@ -39,6 +39,8 @@ from data_processor import (
     TABLE_FILTER_MAX_OPTIONS,
     TREND_FOOT,
     TREND_METHODS,
+    TIMELINE_FOOT,
+    TIMELINE_METHODS,
     TREND_MIN_EVENTS,
     build_summary_metrics_table,
     calculate_snapshot_areas,
@@ -5056,6 +5058,270 @@ def render_trend_detection(analysis):
     )
 
 
+TIMELINE_MAX_RELEASE_CHIPS = 6
+
+
+def repository_timeline_figure(timeline):
+
+    rows = timeline["rows"]
+    series = {item["key"]: item for item in timeline["series"]}
+    x = [row["month_start"] for row in rows]
+    period = dict(xperiod="M1", xperiodalignment="middle")
+
+    has_bars = "commits" in series
+    line_keys = [key for key in ("issues", "pull_requests") if key in series]
+    line_axis = "y2" if has_bars else "y"
+    line_colors = {"issues": CHART_COLORS[3], "pull_requests": CHART_COLORS[1]}
+
+    fig = go.Figure()
+
+    if has_bars:
+        fig.add_trace(go.Bar(
+            x=x, y=[row["commits"] for row in rows],
+            name="Commits",
+            marker=dict(color=CHART_COLORS[0], line=dict(width=0)),
+            hovertemplate="<b>%{y:,}</b> commits<extra></extra>",
+            **period,
+        ))
+
+    for key in line_keys:
+        fig.add_trace(go.Scatter(
+            x=x, y=[row[key] for row in rows],
+            mode="lines+markers",
+            name=series[key]["name"],
+            yaxis=line_axis,
+            line=dict(color=line_colors[key], width=2.2),
+            marker=dict(size=6),
+            hovertemplate="<b>%{y:,}</b> " + series[key]["unit"] + "<extra></extra>",
+            **period,
+        ))
+
+    release_rows = [
+        release
+        for row in rows
+        for release in row["releases"]
+    ]
+
+    if release_rows:
+
+        if has_bars and line_keys:
+            axis = "y2"
+            values = [row[key] for row in rows for key in line_keys]
+        elif has_bars:
+            axis = "y"
+            values = [row["commits"] for row in rows]
+        else:
+            axis = "y"
+            values = [row[key] for row in rows for key in line_keys]
+
+        top = max(values, default=0)
+        height = max(top * 1.12, 1)
+
+        fig.add_trace(go.Scatter(
+            x=[release["published_at"] for release in release_rows],
+            y=[height] * len(release_rows),
+            mode="markers",
+            name="Releases",
+            yaxis=axis,
+            marker=dict(
+                symbol="diamond",
+                size=11,
+                color=[
+                    CHART_COLORS[6] if release["prerelease"] else THEME["accent_2"]
+                    for release in release_rows
+                ],
+                line=dict(color=THEME["surface"], width=1.5),
+            ),
+            customdata=[[release["tag"]] for release in release_rows],
+            hovertemplate="Release <b>%{customdata[0]}</b><extra></extra>",
+        ))
+
+    fig.update_xaxes(title_text=None)
+
+    if has_bars:
+        fig.update_yaxes(title_text="Commits", rangemode="tozero")
+
+    if has_bars and line_keys:
+        fig.update_layout(yaxis2=dict(
+            overlaying="y",
+            side="right",
+            title=dict(text="Issues and pull requests"),
+            rangemode="tozero",
+        ))
+    elif not has_bars and line_keys:
+        fig.update_yaxes(title_text="Issues and pull requests", rangemode="tozero")
+
+    if not has_bars and not line_keys:
+        fig.update_yaxes(visible=False, range=[0.5, 1.5])
+
+    fig.update_layout(bargap=0.25)
+
+    styled = _style_figure(fig, height=380, legend=True)
+
+    if has_bars and line_keys:
+        styled.update_layout(yaxis2=dict(showgrid=False))
+
+    return styled
+
+
+def timeline_month_html(row, series):
+
+    parts = []
+
+    for item in series:
+
+        value = row[item["key"]]
+
+        if not value:
+            continue
+
+        unit = item["singular"] if value == 1 else item["unit"]
+
+        parts.append(
+            f'<span style="color:{THEME["text"]};font-size:.92rem;">'
+            f'<b>{fmt_int(value)}</b> '
+            f'<span style="color:{THEME["text_3"]};">{esc(unit)}</span></span>'
+        )
+
+    visible = row["releases"][:TIMELINE_MAX_RELEASE_CHIPS]
+
+    for release in visible:
+
+        tone = THEME["warning"] if release["prerelease"] else THEME["accent_2"]
+        label = "Pre-release" if release["prerelease"] else "Release"
+
+        parts.append(
+            f'<span style="display:inline-flex;align-items:center;gap:.35rem;'
+            f'padding:.1rem .6rem;border-radius:999px;border:1px solid {tone};'
+            f'color:{tone};font-size:.82rem;">'
+            f'{icon("tag", 13, 2)}{esc(label)} {esc(release["tag"])}</span>'
+        )
+
+    hidden = len(row["releases"]) - len(visible)
+
+    if hidden > 0:
+        parts.append(
+            f'<span style="color:{THEME["text_3"]};font-size:.82rem;">'
+            f'+{fmt_int(hidden)} more releases</span>'
+        )
+
+    return (
+        f'<div style="display:grid;grid-template-columns:5.5rem 1fr;gap:.9rem;'
+        f'padding:.55rem 0;border-bottom:1px solid {THEME["border"]};">'
+        f'<div style="color:{THEME["text_2"]};font-weight:600;font-size:.9rem;">'
+        f'{esc(row["month_start"].strftime("%b %Y"))}</div>'
+        f'<div style="display:flex;flex-wrap:wrap;gap:.4rem 1rem;align-items:center;">'
+        f'{"".join(parts)}</div></div>'
+    )
+
+
+def render_repository_timeline(analysis):
+
+    timeline = analysis.get("repository_timeline") or {}
+    rows = timeline.get("rows") or []
+
+    if not rows:
+        return
+
+    section_header(
+        "Repository Timeline",
+        "Commits, issues, pull requests and releases combined into one month-by-month development story.",
+        "calendar",
+    )
+
+    first = timeline["first_month"].strftime("%b %Y")
+    last = timeline["last_month"].strftime("%b %Y")
+
+    cards = [
+        {
+            "label": "Active Months",
+            "value": fmt_int(timeline["active_months"]),
+            "icon": "calendar",
+            "tone": "blue",
+            "hint": first if first == last else f"{first} – {last}",
+        },
+    ]
+
+    if timeline["busiest"]:
+        cards.append({
+            "label": "Busiest Month",
+            "value": timeline["busiest"]["month_start"].strftime("%b %Y"),
+            "icon": "trending",
+            "tone": "success",
+            "hint": f"{fmt_int(timeline['busiest']['events'])} events",
+        })
+
+    if timeline["series"]:
+        cards.append({
+            "label": "Events Recorded",
+            "value": fmt_int(timeline["total_events"]),
+            "icon": "clock",
+            "tone": "violet",
+            "hint": ", ".join(item["name"] for item in timeline["series"]),
+        })
+
+    if timeline["has_releases"]:
+        cards.append({
+            "label": "Releases",
+            "value": fmt_int(timeline["release_count"]),
+            "icon": "tag",
+            "tone": "warning",
+            "hint": "Published in this window",
+        })
+
+    kpi_grid(cards)
+
+    table = timeline["table"].sort_values("month_start", ascending=False)
+
+    column_config = {
+        "month_start": st.column_config.DatetimeColumn("Month", format="MMM YYYY"),
+        "commits": st.column_config.NumberColumn("Commits", format="%d"),
+        "issues": st.column_config.NumberColumn("Issues opened", format="%d"),
+        "pull_requests": st.column_config.NumberColumn("Pull requests opened", format="%d"),
+        "releases": st.column_config.NumberColumn("Releases", format="%d"),
+        "release_tags": st.column_config.TextColumn("Release tags", width="medium"),
+    }
+
+    visual_card(
+        "repository_timeline",
+        "Monthly activity",
+        "Commits as bars, issues and pull requests as lines, and releases as diamonds.",
+        fig=repository_timeline_figure(timeline),
+        df=table,
+        column_config=column_config,
+        column_order=[column for column in column_config if column in table.columns],
+        height=380,
+    )
+
+    years = sorted({row["year"] for row in rows}, reverse=True)
+
+    with card_open(
+        "repository_timeline_story",
+        "Development story",
+        "Each year, newest first, with activity and releases per month.",
+    ):
+
+        for index, year in enumerate(years):
+
+            year_rows = [row for row in rows if row["year"] == year][::-1]
+            label = f"{year} · {len(year_rows)} active month{'s' if len(year_rows) != 1 else ''}"
+
+            with st.expander(label, expanded=index == 0):
+
+                render_html("".join(
+                    timeline_month_html(row, timeline["series"])
+                    for row in year_rows
+                ))
+
+    render_methodology(
+        "timeline_method",
+        "How the timeline is built",
+        "Each month above follows these rules.",
+        TIMELINE_METHODS,
+        TIMELINE_FOOT,
+    )
+
+
 def render_results():
 
     analysis = st.session_state.analysis
@@ -5092,6 +5358,9 @@ def render_results():
 
         if selected & {"Commits", "Issues", "Pull Requests"}:
             render_trend_detection(analysis)
+
+        if selected & {"Commits", "Issues", "Pull Requests", "Releases"}:
+            render_repository_timeline(analysis)
 
         if "Commits" in selected:
             render_commits_section(analysis)

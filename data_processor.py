@@ -3002,6 +3002,159 @@ def build_contributor_leaderboard(contributors_df, commits_df, period_start=None
     return board
 
 
+TIMELINE_SERIES = [
+    ("commits", "Commits", "Commits", "commits", "commit", "date"),
+    ("issues", "Issues", "Issues", "issues opened", "issue opened", "created_at"),
+    ("pull_requests", "Pull Requests", "Pull requests", "pull requests opened", "pull request opened", "created_at"),
+]
+
+
+def _timeline_month_counts(dates):
+
+    if dates.empty:
+        return {}
+
+    return dates.dt.strftime("%Y-%m").value_counts().to_dict()
+
+
+def _timeline_releases(releases_df):
+
+    if releases_df is None or releases_df.empty or "published_at" not in releases_df.columns:
+        return {}
+
+    frame = releases_df.copy()
+    frame["_stamp"] = _utc_series(frame["published_at"])
+    frame = frame.dropna(subset=["_stamp"]).sort_values("_stamp")
+
+    grouped = {}
+
+    for _, item in frame.iterrows():
+
+        prerelease = item.get("prerelease", False)
+        prerelease = bool(prerelease) if pd.notna(prerelease) else False
+
+        grouped.setdefault(item["_stamp"].strftime("%Y-%m"), []).append({
+            "tag": str(item.get("tag", "Unknown")),
+            "name": str(item.get("name", "")),
+            "prerelease": prerelease,
+            "published_at": item["_stamp"],
+        })
+
+    return grouped
+
+
+def calculate_repository_timeline(
+    commits_df,
+    issues_df,
+    pull_requests_df,
+    releases_df,
+    selected_analyses,
+):
+
+    selected = set(selected_analyses or [])
+    frames = {
+        "commits": commits_df,
+        "issues": issues_df,
+        "pull_requests": pull_requests_df,
+    }
+
+    series = []
+    counts = {}
+
+    for key, required, name, unit, singular, column in TIMELINE_SERIES:
+
+        if required not in selected:
+            continue
+
+        series.append({"key": key, "name": name, "unit": unit, "singular": singular})
+        counts[key] = _timeline_month_counts(_dates_from(frames[key], column))
+
+    has_releases = "Releases" in selected
+    releases = _timeline_releases(releases_df) if has_releases else {}
+
+    months = set(releases)
+
+    for month_counts in counts.values():
+        months |= set(month_counts)
+
+    rows = []
+
+    for month in sorted(months):
+
+        stamp = pd.Timestamp(f"{month}-01", tz="UTC")
+
+        row = {
+            "month": month,
+            "month_start": stamp,
+            "year": int(stamp.year),
+            "releases": releases.get(month, []),
+        }
+
+        for item in series:
+            row[item["key"]] = int(counts[item["key"]].get(month, 0))
+
+        row["events"] = sum(row[item["key"]] for item in series)
+
+        rows.append(row)
+
+    table_rows = []
+
+    for row in rows:
+
+        entry = {"month_start": row["month_start"]}
+
+        for item in series:
+            entry[item["key"]] = row[item["key"]]
+
+        if has_releases:
+            entry["releases"] = len(row["releases"])
+            entry["release_tags"] = ", ".join(release["tag"] for release in row["releases"])
+
+        table_rows.append(entry)
+
+    busiest = None
+
+    if rows and series:
+
+        top = max(rows, key=lambda row: row["events"])
+
+        if top["events"] > 0:
+            busiest = {"month_start": top["month_start"], "events": top["events"]}
+
+    return {
+        "rows": rows,
+        "series": series,
+        "table": pd.DataFrame(table_rows),
+        "has_releases": has_releases,
+        "active_months": len(rows),
+        "first_month": rows[0]["month_start"] if rows else None,
+        "last_month": rows[-1]["month_start"] if rows else None,
+        "total_events": sum(row["events"] for row in rows),
+        "release_count": sum(len(row["releases"]) for row in rows),
+        "busiest": busiest,
+    }
+
+
+TIMELINE_METHODS = [
+    {
+        "name": "How the timeline is built",
+        "summary": "Activity that was already fetched for the selected analyses is grouped by calendar month. No extra API requests are made.",
+        "rules": [
+            ("Commits", "Counted in the month of the commit date."),
+            ("Issues and pull requests", "Counted in the month they were opened."),
+            ("Releases", "Placed in the month they were published. Drafts without a publish date are left out, and pre-releases are marked."),
+            ("Months", "Months are UTC calendar months. A month appears only when at least one selected activity happened in it."),
+            ("Not selected", "An analysis that was not selected is left out of the timeline instead of being shown as zero."),
+        ],
+    },
+]
+
+TIMELINE_FOOT = (
+    "The timeline only covers data fetched for the chosen analysis window, "
+    "so months before the window or beyond fetched record limits are not shown."
+)
+
+
 SNAPSHOT_AREAS = [
     ("activity", "Activity", ("High", "Medium", "Low")),
     ("collaboration", "Collaboration", ("High", "Medium", "Low")),

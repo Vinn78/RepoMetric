@@ -29,6 +29,7 @@ from data_processor import (
     calculate_release_metrics,
     calculate_health_score,
     calculate_trend_detection,
+    calculate_repository_timeline,
     build_contributor_leaderboard,
     calculate_commit_velocity,
     calculate_issue_resolution,
@@ -1767,6 +1768,14 @@ def _analyze_uncached(
         now=until,
     )
 
+    repository_timeline = calculate_repository_timeline(
+        commits_df,
+        issues_df,
+        pull_requests_df,
+        releases_df,
+        selected_analyses,
+    )
+
     _stage_finish("metrics", True)
 
     return {
@@ -1816,6 +1825,7 @@ def _analyze_uncached(
 
         "health_score": health_score,
         "trend_detection": trend_detection,
+        "repository_timeline": repository_timeline,
     }
 
 
