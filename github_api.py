@@ -457,6 +457,58 @@ HEADERS = {
 if GITHUB_TOKEN:
     HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
+RATE_LIMIT_URL = "https://api.github.com/rate_limit"
+RATE_LIMIT_RESOURCES = ("core", "graphql", "search")
+
+
+def get_rate_limit_status():
+
+    authenticated = bool(GITHUB_TOKEN)
+
+    try:
+        response = requests.get(RATE_LIMIT_URL, headers=HEADERS, timeout=10)
+    except requests.exceptions.RequestException:
+        return {"ok": False, "reason": "network", "authenticated": authenticated}
+
+    if response.status_code == 401:
+        return {"ok": False, "reason": "auth", "authenticated": authenticated}
+
+    if response.status_code != 200:
+        return {
+            "ok": False,
+            "reason": "unavailable",
+            "status": response.status_code,
+            "authenticated": authenticated,
+        }
+
+    try:
+        resources = response.json().get("resources") or {}
+    except (ValueError, AttributeError):
+        return {"ok": False, "reason": "unavailable", "authenticated": authenticated}
+
+    buckets = {}
+
+    for name in RATE_LIMIT_RESOURCES:
+
+        values = resources.get(name) or {}
+        limit = _to_int(values.get("limit"))
+        remaining = _to_int(values.get("remaining"))
+        reset = _to_int(values.get("reset"))
+
+        if limit and remaining is not None:
+            buckets[name] = {"limit": limit, "remaining": remaining, "reset": reset}
+
+    if not buckets:
+        return {"ok": False, "reason": "unavailable", "authenticated": authenticated}
+
+    return {
+        "ok": True,
+        "authenticated": authenticated,
+        "buckets": buckets,
+        "low_share": RATE_LIMIT_LOW_SHARE,
+        "checked_at": time.time(),
+    }
+
 
                                                               
                              

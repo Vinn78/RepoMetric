@@ -20,6 +20,7 @@ Layout of this file
 
 import html
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime
@@ -69,6 +70,7 @@ from github_api import (
     RunTracker,
     ServerError,
     analyze_repository,
+    get_rate_limit_status,
 )
 
 st.set_page_config(
@@ -1382,6 +1384,7 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-rate__row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .gs-rate__name { flex: 0 0 70px; font-size: 0.84rem; font-weight: 600; color: var(--gs-text); }
 .gs-rate__text { font-size: 0.84rem; color: var(--gs-text-2); font-variant-numeric: tabular-nums; }
+.gs-rate__count { font-size: 0.84rem; font-weight: 600; color: var(--gs-text); font-variant-numeric: tabular-nums; }
 .gs-rate__foot { font-size: 0.8rem; color: var(--gs-text-3); line-height: 1.45; }
 .gs-meter { flex: 1 1 140px; min-width: 100px; height: 6px; overflow: hidden; border-radius: 6px; background: rgba(255,255,255,0.08); }
 .gs-meter__fill { height: 100%; border-radius: 6px; }
@@ -4400,6 +4403,26 @@ def fmt_reset(epoch):
     return f"{stamp.strftime('%H:%M')} UTC"
 
 
+def fmt_reset_in(epoch):
+
+    if epoch is None:
+        return "at an unknown time"
+
+    seconds = int(epoch - time.time())
+
+    if seconds <= 0:
+        return "now"
+
+    minutes = max(1, round(seconds / 60))
+
+    if minutes < 60:
+        return f"in {minutes} minute{'s' if minutes != 1 else ''}"
+
+    hours, rest = divmod(minutes, 60)
+
+    return f"in {hours} h {rest} min" if rest else f"in {hours} h"
+
+
 def reset_phrase(extra):
 
     extra = extra or {}
@@ -4564,7 +4587,7 @@ def render_rate_limit_bar(analysis):
             f'<div class="gs-rate__row">'
             f'<span class="gs-rate__name">{esc(label)}</span>'
             f'<div class="gs-meter"><div class="gs-meter__fill" style="width:{max(2.0, share * 100):.1f}%;background:{color};"></div></div>'
-            f'<span class="gs-rate__text">{fmt_int(bucket["remaining"])} of {fmt_int(bucket["limit"])} left &middot; resets {esc(fmt_reset(bucket["reset"]))}</span>'
+            f'<span class="gs-rate__text">{fmt_int(bucket["remaining"])} of {fmt_int(bucket["limit"])} left &middot; resets {esc(fmt_reset_in(bucket["reset"]))} ({esc(fmt_reset(bucket["reset"]))})</span>'
             f'</div>'
         )
 
@@ -4692,6 +4715,85 @@ def render_data_status(analysis, owner, repo, selected):
 
         if ready is not None and ready["signature"] == signature and ready["notes"]:
             notice("warning", "Some tables were shortened", " ".join(ready["notes"]))
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_rate_limit_status():
+
+    return get_rate_limit_status()
+
+
+def live_rate_rows_html(status):
+
+    low_share = status.get("low_share", 0.10)
+    rows = []
+
+    for label, bucket in rate_buckets(status):
+
+        share = bucket["remaining"] / bucket["limit"]
+        color = THEME["warning"] if share < low_share else THEME["success"]
+
+        rows.append(
+            f'<div class="gs-rate__row">'
+            f'<span class="gs-rate__name">{esc(label)}</span>'
+            f'<div class="gs-meter"><div class="gs-meter__fill" style="width:{max(2.0, share * 100):.1f}%;background:{color};"></div></div>'
+            f'<span class="gs-rate__count">{fmt_int(bucket["remaining"])} / {fmt_int(bucket["limit"])}</span>'
+            f'<span class="gs-rate__text">Reset {esc(fmt_reset_in(bucket["reset"]))} &middot; {esc(fmt_reset(bucket["reset"]))}</span>'
+            f'</div>'
+        )
+
+    return "".join(rows)
+
+
+def live_rate_message(status):
+
+    reason = status.get("reason")
+
+    if reason == "auth":
+        return "GitHub rejected the configured GITHUB_TOKEN, so the API status cannot be read. Check the token or remove it to use anonymous access."
+
+    if reason == "network":
+        return "GitHub could not be reached, so the API status is unavailable right now."
+
+    return "GitHub did not return rate-limit information, so the API status is unavailable right now."
+
+
+@st.fragment(run_every="60s")
+def render_live_rate_limit():
+
+    status = cached_rate_limit_status()
+
+    with card_open(
+        "api_status",
+        "GitHub API status",
+        "Live allowance read from GitHub's rate-limit endpoint, which does not count against your requests.",
+    ):
+
+        if not status.get("ok"):
+
+            render_html(
+                f'<div class="gs-rate"><div class="gs-rate__foot">{esc(live_rate_message(status))}</div></div>'
+            )
+
+        else:
+
+            low = rate_is_low(status)
+            foot = [
+                "Authenticated with a token" if status.get("authenticated") else "No token configured, so GitHub's lower anonymous limit applies",
+                f"Checked {esc(fmt_age(time.time() - status['checked_at']))} ago",
+            ]
+
+            if low:
+                foot.append(f"Below {status['low_share'] * 100:.0f}% of the allowance remains")
+
+            render_html(
+                f'<div class="gs-rate{" gs-rate--warn" if low else ""}">{live_rate_rows_html(status)}'
+                f'<div class="gs-rate__foot">{" · ".join(foot)}</div></div>'
+            )
+
+        if st.button("Check now", key="rate_limit_check"):
+            cached_rate_limit_status.clear()
+            st.rerun(scope="fragment")
 
 
 def render_api_usage(analysis):
@@ -4830,6 +4932,8 @@ def main():
     analyze_clicked = render_control_panel()
 
     compare_clicked = render_compare_panel()
+
+    render_live_rate_limit()
 
     refresh_wanted = st.session_state.refresh_requested
     st.session_state.refresh_requested = False
