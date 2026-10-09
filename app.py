@@ -548,7 +548,7 @@ footer { display: none !important; }
 .gs-hero {
     position: relative;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 18px;
     padding: 4px 2px 26px;
     margin-bottom: 4px;
@@ -566,6 +566,7 @@ footer { display: none !important; }
     position: relative;
     flex: none;
     width: 54px; height: 54px;
+    margin-top: 4px;
     display: grid;
     place-items: center;
     border-radius: 16px;
@@ -681,10 +682,10 @@ div.st-key-compare_field [data-testid="stTextInput"] input::placeholder {
 div.st-key-module_grid {
     display: grid !important;
     grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
-    gap: 12px !important;
+    gap: 14px !important;
 }
 
-div[class*="st-key-apick_"] { position: relative; gap: 0 !important; }
+div[class*="st-key-apick_"] { position: relative; gap: 0 !important; min-height: 132px; }
 
 div[class*="st-key-apick_"] [data-testid="stElementContainer"] { position: static; margin: 0; }
 
@@ -695,7 +696,8 @@ div[class*="st-key-apick_"] [data-testid="stButton"] {
     
     position: absolute;
     top: 0; left: 0; right: 0;
-    height: 112px;
+    bottom: 0;
+    height: auto;
     z-index: 3;
 }
 
@@ -713,7 +715,7 @@ div[class*="st-key-apick_"] [data-testid="stButton"] button {
     display: flex;
     align-items: flex-start;
     gap: 14px;
-    min-height: 96px;
+    min-height: 128px;
     padding: 16px 44px 16px 16px;
     border: 1px solid var(--gs-border);
     border-radius: 14px;
@@ -805,6 +807,17 @@ div[class*="st-key-atool_"] button p,
 div[class*="st-key-dl_"] button p { color: inherit !important; }
 
 div[class*="st-key-dl_"] { display: flex; justify-content: flex-end; }
+
+div[class*="st-key-atool_toggle_"] button {
+    width: 34px !important;
+    min-width: 34px;
+    padding: 0 !important;
+    font-size: 15px;
+}
+
+div[class*="st-key-atool_"] { margin: 0; }
+
+div[class*="st-key-atools_"] { align-items: center; flex-wrap: wrap; }
 
 .gs-foot-note { font-size: 0.88rem; color: var(--gs-text-2); line-height: 1.5; }
 .gs-foot-note b { color: var(--gs-text); font-weight: 600; }
@@ -1009,8 +1022,8 @@ div[class*="st-key-table-collapsed-"] {
     padding: 7px 10px;
     box-shadow: var(--gs-shadow);
     min-width: 0;
-    margin-top: 0;
-    margin-bottom: 0;
+    margin-top: 0.15rem;
+    margin-bottom: 0.15rem;
 }
 
 div[class*="st-key-table-collapsed-"] [data-testid="stHorizontalBlock"] {
@@ -1097,7 +1110,7 @@ div[class*="st-key-table-collapsed-"] button:hover {
 .gs-insight__body { margin-top: 4px; font-size: 0.97rem; line-height: 1.55; color: var(--gs-text); }
 .gs-insight__body strong { font-weight: 600; color: #fff; }
 
-.gs-insights-title { margin: 0.3rem 0 0.1rem; font-size: 1rem; font-weight: 600; color: var(--gs-text); }
+.gs-insights-title { margin: 0.6rem 0 0.8rem; font-size: 1rem; font-weight: 600; color: var(--gs-text); }
 
 
 .gs-repo {
@@ -1346,9 +1359,9 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-pill--warn { color: #efc27e; background: rgba(227,169,79,0.12); border: 1px solid rgba(227,169,79,0.25); }
 .gs-pill--muted { color: var(--gs-text-2); background: rgba(255,255,255,0.05); border: 1px solid var(--gs-border); }
 
-.gs-method { display: flex; flex-direction: column; }
+.gs-method { display: flex; flex-direction: column; margin-top: 8px; }
 .gs-method__row { display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid var(--gs-border); }
-.gs-method__row:first-child { border-top: 0; padding-top: 2px; }
+.gs-method__row:first-child { border-top: 0; padding-top: 8px; }
 .gs-method__name { flex: 0 0 150px; font-size: 0.92rem; font-weight: 600; color: var(--gs-text); }
 .gs-method__weight { display: block; margin-top: 2px; font-size: 0.78rem; font-weight: 400; color: var(--gs-text-3); }
 .gs-method__body { min-width: 0; flex: 1; font-size: 0.86rem; line-height: 1.5; color: var(--gs-text-2); }
@@ -1912,20 +1925,31 @@ def render_table_tools(key, title, df, filter_columns=None, date_column=None):
     return filtered
 
 
+def card_head_html(title, subtitle=None):
+
+    sub_html = f'<div class="gs-card__sub">{esc(subtitle)}</div>' if subtitle else ""
+
+    return f"""
+    <div class="gs-card__title">{esc(title)}</div>
+    {sub_html}
+    """
+
+
 def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart", filter_columns=None, date_column=None):
 
     if fig is not None:
-        with card_open(f"{key}_chart", title, subtitle):
-            chart_action_cols = st.columns([1, 0.12], gap="small")
-            with chart_action_cols[1]:
-                st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
-                if st.button("Expand", key=f"{key}_chart_expand", width="stretch"):
-                    expanded_view(
-                        title,
-                        fig=fig,
-                        height=max(height, 520),
-                    )
-                st.markdown('</div>', unsafe_allow_html=True)
+        with card_open(f"{key}_chart"):
+            chart_head = st.columns([6, 1], gap="small", vertical_alignment="top")
+            with chart_head[0]:
+                render_html(card_head_html(title, subtitle))
+            with chart_head[1]:
+                with st.container(key=f"atool_expand_{key}_chart"):
+                    if st.button("Expand", key=f"{key}_chart_expand"):
+                        expanded_view(
+                            title,
+                            fig=fig,
+                            height=max(height, 520),
+                        )
             render_chart(fig, key=f"{key}_plot")
 
     if df is not None:
@@ -1948,33 +1972,30 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
                         st.session_state[table_state_key] = True
                         st.rerun()
         else:
-            with card_open(f"{key}_table", f"{title} table", "Detailed data for this analysis."):
-                table_action_cols = st.columns([1, 0.08, 0.08], gap="small")
+            with card_open(f"{key}_table"):
+                table_head = st.columns([8, 1.4, 0.6], gap="small", vertical_alignment="top")
+
+                with table_head[0]:
+                    render_html(card_head_html(f"{title} table", "Detailed data for this analysis."))
 
                 view_df = render_table_tools(key, title, df, filter_columns, date_column)
 
-                with table_action_cols[1]:
-                    st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
-                    if st.button("Expand", key=f"{key}_table_expand", width="stretch"):
-                        expanded_view(
-                            f"{title} table",
-                            df=view_df,
-                            column_config=column_config,
-                            height=max(height, 520),
-                            column_order=column_order,
-                        )
-                    st.markdown('</div>', unsafe_allow_html=True)
+                with table_head[1]:
+                    with st.container(key=f"atool_expand_{key}_table"):
+                        if st.button("Expand", key=f"{key}_table_expand"):
+                            expanded_view(
+                                f"{title} table",
+                                df=view_df,
+                                column_config=column_config,
+                                height=max(height, 520),
+                                column_order=column_order,
+                            )
 
-                with table_action_cols[2]:
-                    st.markdown('<div class="gs-table-toggle">', unsafe_allow_html=True)
-                    if st.button(
-                        "⌃",
-                        key=f"{key}_table_toggle",
-                        width="stretch",
-                    ):
-                        st.session_state[table_state_key] = False
-                        st.rerun()
-                    st.markdown('</div>', unsafe_allow_html=True)
+                with table_head[2]:
+                    with st.container(key=f"atool_toggle_{key}_table"):
+                        if st.button("⌃", key=f"{key}_table_toggle"):
+                            st.session_state[table_state_key] = False
+                            st.rerun()
 
                 if view_df.empty and not df.empty:
                     render_html('<div class="gs-empty-chart">No rows match the current search and filters.</div>')
@@ -1985,6 +2006,7 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
                         height=height,
                         column_order=column_order,
                     )
+
 
 def _style_figure(fig, height=340, legend=True):
     """Apply the shared dark theme to any Plotly figure in place."""
@@ -2019,6 +2041,7 @@ def _style_figure(fig, height=340, legend=True):
         linecolor="rgba(255,255,255,0.09)",
         tickfont=dict(color=THEME["text_3"], size=11.5),
         title_font=dict(color=THEME["text_2"], size=12),
+        automargin=True,
     )
 
     fig.update_yaxes(
@@ -2027,6 +2050,7 @@ def _style_figure(fig, height=340, legend=True):
         linecolor="rgba(255,255,255,0.09)",
         tickfont=dict(color=THEME["text_3"], size=11.5),
         title_font=dict(color=THEME["text_2"], size=12),
+        automargin=True,
     )
 
     return fig
@@ -2177,17 +2201,43 @@ def languages_figure(languages_df, top_n=8):
 
         head = ordered
 
+    total = float(head["bytes"].sum()) or 1.0
+    shares = [float(value) / total * 100 for value in head["bytes"]]
+    labels = [
+        f"{name}<br>{share:.1f}%" if share >= 2.5 else ""
+        for name, share in zip(head["language"], shares)
+    ]
+    positions = [
+        "inside" if share >= 8 else ("outside" if share >= 2.5 else "none")
+        for share in shares
+    ]
+
     fig = go.Figure(go.Pie(
         labels=head["language"],
         values=head["bytes"],
         hole=0.5,
+        sort=False,
         marker=dict(colors=CHART_COLORS, line=dict(color=THEME["surface"], width=3)),
-        textinfo="label+percent",
+        text=labels,
+        textinfo="text",
+        textposition=positions,
+        insidetextorientation="horizontal",
         textfont=dict(size=12, color=THEME["text"]),
         hovertemplate="<b>%{label}</b><br>%{percent} of code<extra></extra>",
     ))
 
-    return _style_figure(fig, height=340)
+    styled = _style_figure(fig, height=340)
+
+    styled.update_layout(
+        margin=dict(l=24, r=24, t=24, b=24),
+        legend=dict(
+            orientation="v",
+            yanchor="middle", y=0.5,
+            xanchor="left", x=1.02,
+        ),
+    )
+
+    return styled
 
 
 def releases_timeline_figure(releases_df):
@@ -2202,17 +2252,35 @@ def releases_timeline_figure(releases_df):
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
+        x=[ordered["published_at"].min(), ordered["published_at"].max()],
+        y=[1, 1],
+        mode="lines",
+        line=dict(color="rgba(255,255,255,0.14)", width=2),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    fig.add_trace(go.Scatter(
         x=ordered["published_at"], y=[1] * len(ordered),
-        mode="markers",
+        mode="markers+text",
+        text=ordered["tag"],
+        textposition="top center",
+        textfont=dict(size=12, color=THEME["text_2"]),
+        cliponaxis=False,
         marker=dict(size=13, color=colors, line=dict(color=THEME["surface"], width=2)),
         customdata=ordered[["tag", "name"]],
         hovertemplate="<b>%{customdata[0]}</b><br>%{x|%d %b %Y}<extra></extra>",
+        showlegend=False,
     ))
 
-    fig.update_yaxes(visible=False, range=[0.5, 1.5])
-    fig.update_xaxes(title_text=None)
+    fig.update_yaxes(visible=False, range=[0.6, 1.5])
+    fig.update_xaxes(title_text=None, tickformat="%d %b %Y")
 
-    return _style_figure(fig, height=170, legend=False)
+    styled = _style_figure(fig, height=190, legend=False)
+    styled.update_layout(margin=dict(l=32, r=32, t=8, b=8))
+
+    return styled
+
 
 def health_color(score):
 
@@ -3052,6 +3120,7 @@ def shorten(text, limit=46):
 def render_methodology(key, title, subtitle, methods, foot):
 
     rows = []
+    single = len(methods) == 1
 
     for item in methods:
 
@@ -3060,9 +3129,11 @@ def render_methodology(key, title, subtitle, methods, foot):
             for label, rule in item["rules"]
         )
 
+        name_html = "" if single else f'<div class="gs-method__name">{esc(item["name"])}</div>'
+
         rows.append(f"""
         <div class="gs-method__row">
-            <div class="gs-method__name">{esc(item['name'])}</div>
+            {name_html}
             <div class="gs-method__body">{esc(item['summary'])}{rules}</div>
         </div>
         """)
@@ -3912,21 +3983,19 @@ def render_control_panel():
                 label_visibility="collapsed",
             )
 
-        top = st.columns([1, 1], gap="small")
+        top = st.columns([1, 1], gap="small", vertical_alignment="center")
 
         with top[0]:
             render_html('<div class="gs-field-label"><b>Analyses to run</b></div>')
 
         with top[1]:
 
-            tool_cols = st.columns([1, 1, 6], gap="small")
+            with st.container(horizontal=True, horizontal_alignment="right", gap="small", key="atools_row_all"):
 
-            with tool_cols[0]:
                 with st.container(key="atool_all"):
                     if st.button("Select all", key="select_all_btn"):
                         st.session_state.selected = set(ANALYSIS_OPTIONS)
 
-            with tool_cols[1]:
                 with st.container(key="atool_clear"):
                     if st.button("Clear", key="clear_all_btn"):
                         st.session_state.selected = set()
@@ -4814,16 +4883,14 @@ def render_data_status(analysis, owner, repo, selected):
         render_html(fetched_status_html(analysis))
         render_rate_limit_bar(analysis)
 
-        cols = st.columns([1, 1.6, 4], gap="small", vertical_alignment="center")
-
-        with cols[0]:
-            with st.container(key="atool_refresh"):
-                st.button("Refresh data", key="refresh_btn", on_click=request_refresh)
-
         signature = (owner, repo, st.session_state.analysis_stamp, tuple(sorted(selected)))
         ready = st.session_state.workbook_ready
+        prepare_clicked = False
 
-        with cols[1]:
+        with st.container(horizontal=True, vertical_alignment="center", gap="small", key="atools_row_data"):
+
+            with st.container(key="atool_refresh"):
+                st.button("Refresh data", key="refresh_btn", on_click=request_refresh)
 
             if ready is not None and ready["signature"] == signature:
                 st.download_button(
@@ -4835,17 +4902,21 @@ def render_data_status(analysis, owner, repo, selected):
                     on_click="ignore",
                 )
 
-            elif st.button("Prepare Excel workbook", key="dl_all_xlsx_prep"):
+            else:
+                with st.container(key="atool_prepare"):
+                    prepare_clicked = st.button("Prepare Excel workbook", key="dl_all_xlsx_prep")
 
-                with st.spinner("Building the workbook"):
-                    data, notes = tables_to_excel_bytes(export_tables(analysis, selected))
+        if prepare_clicked:
 
-                st.session_state.workbook_ready = {
-                    "signature": signature,
-                    "data": data,
-                    "notes": notes,
-                }
-                st.rerun()
+            with st.spinner("Building the workbook"):
+                data, notes = tables_to_excel_bytes(export_tables(analysis, selected))
+
+            st.session_state.workbook_ready = {
+                "signature": signature,
+                "data": data,
+                "notes": notes,
+            }
+            st.rerun()
 
         if ready is not None and ready["signature"] == signature and ready["notes"]:
             notice("warning", "Some tables were shortened", " ".join(ready["notes"]))
@@ -4925,9 +4996,10 @@ def render_live_rate_limit():
                 f'<div class="gs-rate__foot">{" · ".join(foot)}</div></div>'
             )
 
-        if st.button("Check now", key="rate_limit_check"):
-            cached_rate_limit_status.clear()
-            st.rerun(scope="fragment")
+        with st.container(key="atool_check"):
+            if st.button("Check now", key="rate_limit_check"):
+                cached_rate_limit_status.clear()
+                st.rerun(scope="fragment")
 
 
 def render_api_usage(analysis):
@@ -5141,7 +5213,7 @@ def repository_timeline_figure(timeline):
             hovertemplate="Release <b>%{customdata[0]}</b><extra></extra>",
         ))
 
-    fig.update_xaxes(title_text=None)
+    fig.update_xaxes(title_text=None, dtick="M1", tickformat="%b %Y", ticklabelmode="period")
 
     if has_bars:
         fig.update_yaxes(title_text="Commits", rangemode="tozero")
