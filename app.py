@@ -4277,7 +4277,7 @@ def render_control_panel():
 
         with top[1]:
 
-            tool_cols = st.columns([1, 1, 6], gap="small")
+            tool_cols = st.columns([1, 1,], gap="small")
 
             with tool_cols[0]:
                 with st.container(key="atool_all"):
