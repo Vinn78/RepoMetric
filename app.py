@@ -93,47 +93,102 @@ from github_api import (
 st.set_page_config(
     page_title="RepoMetric",
     page_icon="🔎",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-THEME = {
-    "bg": "#0d0f13",
-    "surface": "#14171d",
-    "surface_2": "#191d25",
-    "surface_3": "#212631",
-    "border": "rgba(255,255,255,0.075)",
+DEFAULT_THEME = "Indigo"
+
+THEME_BASE = {
+    "surface": "#121212",
+    "surface_2": "#181818",
+    "surface_3": "#202020",
+    "field": "#111111",
+    "border": "rgba(255,255,255,0.07)",
     "border_strong": "rgba(255,255,255,0.14)",
-    "text": "#eceff5",
-    "text_2": "#a6aebd",
-    "text_3": "#737c8e",
-    "accent": "#6e7bff",
-    "accent_2": "#8f7bff",
-    "accent_3": "#4f9dff",
+    "text": "#f5f5f5",
+    "text_2": "#999999",
+    "text_3": "#707070",
     "success": "#3fbf95",
     "warning": "#e3a94f",
     "danger": "#e5717d",
 }
-CHART_COLORS = [
-    "#7583ff", "#a08bff", "#56a5f7", "#45c2b0", "#d78fe0",
-    "#8ea2c8", "#e3a94f", "#6cc4e8", "#b6a2ff", "#7f8cf0",
-]
+
+THEMES = {
+    "Indigo": {
+        "bg": "#0a0b12",
+        "c1": "129,140,248", "c2": "99,102,241", "c3": "49,46,129",
+        "accent": "#818cf8", "accent_2": "#6366f1", "accent_3": "#a5b4fc",
+        "deep": "#312e81", "hot": "#4f46e5",
+        "blobs": ["#3730a3", "#7c3aed", "#06b6d4", "#ec4899", "#3b82f6"],
+    },
+    "Ember": {
+        "bg": "#080808",
+        "c1": "243,107,33", "c2": "224,68,36", "c3": "112,21,21",
+        "accent": "#f36b21", "accent_2": "#e04424", "accent_3": "#ff9a55",
+        "deep": "#701515", "hot": "#c62828",
+        "blobs": ["#7a1d1d", "#e04424", "#f36b21", "#f59e0b", "#be185d"],
+    },
+    "Ocean": {
+        "bg": "#080808",
+        "c1": "56,189,248", "c2": "37,99,235", "c3": "23,37,84",
+        "accent": "#38bdf8", "accent_2": "#2563eb", "accent_3": "#7dd3fc",
+        "deep": "#172554", "hot": "#2563eb",
+        "blobs": ["#172554", "#2563eb", "#38bdf8", "#4f46e5", "#22d3ee"],
+    },
+    "Aurora": {
+        "bg": "#080808",
+        "c1": "192,132,252", "c2": "236,72,153", "c3": "76,29,149",
+        "accent": "#c084fc", "accent_2": "#ec4899", "accent_3": "#e9b5ff",
+        "deep": "#4c1d95", "hot": "#ec4899",
+        "blobs": ["#4c1d95", "#ec4899", "#c084fc", "#22d3ee", "#6366f1"],
+    },
+    "Forest": {
+        "bg": "#080808",
+        "c1": "52,211,153", "c2": "16,185,129", "c3": "6,78,59",
+        "accent": "#34d399", "accent_2": "#10b981", "accent_3": "#86efac",
+        "deep": "#064e3b", "hot": "#10b981",
+        "blobs": ["#064e3b", "#10b981", "#34d399", "#0ea5e9", "#14b8a6"],
+    },
+}
+
+THEME = {}
+CHART_COLORS = []
+
+
+def apply_theme(name):
+
+    spec = THEMES.get(name) or THEMES[DEFAULT_THEME]
+
+    THEME.clear()
+    THEME.update(THEME_BASE)
+    THEME.update(spec)
+
+    blobs = spec["blobs"]
+
+    CHART_COLORS[:] = [
+        spec["accent"], blobs[1], blobs[4], "#45c2b0", blobs[3],
+        "#8ea2c8", "#e3a94f", spec["accent_3"], blobs[2], spec["accent_2"],
+    ]
+
+
+apply_theme(DEFAULT_THEME)
 
 FONT_STACK = (
-    '"Geist", "Inter", ui-sans-serif, system-ui, -apple-system, '
+    '"Inter", ui-sans-serif, system-ui, -apple-system, '
     '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
 )
 MONO_STACK = (
-    '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, '
+    'ui-monospace, SFMono-Regular, Menlo, Consolas, '
     '"Liberation Mono", monospace'
 )
 PLOT_FONT = (
-    "Geist, Inter, ui-sans-serif, system-ui, -apple-system, "
+    "Inter, ui-sans-serif, system-ui, -apple-system, "
     "Segoe UI, Roboto, Arial, sans-serif"
 )
 FONT_IMPORT = (
     "@import url('https://fonts.googleapis.com/css2"
-    "?family=Geist:wght@400;500;600;700"
-    "&family=Geist+Mono:wght@400;500&display=swap');"
+    "?family=Inter:wght@400;500;600;700&display=swap');"
 )
 
 ANALYSIS_OPTIONS = [
@@ -420,9 +475,9 @@ def github_url(owner, repo, path=""):
     return f"{base}/{path}" if path else base
 
 def _root_variables():
-    """Design tokens exposed as CSS custom properties (single source of truth)."""
 
     t = THEME
+    blobs = "".join(f"--gs-g{i + 1}:{color};" for i, color in enumerate(t["blobs"]))
 
     return (
         ":root{"
@@ -430,6 +485,7 @@ def _root_variables():
         f"--gs-surface:{t['surface']};"
         f"--gs-surface-2:{t['surface_2']};"
         f"--gs-surface-3:{t['surface_3']};"
+        f"--gs-field:{t['field']};"
         f"--gs-border:{t['border']};"
         f"--gs-border-strong:{t['border_strong']};"
         f"--gs-text:{t['text']};"
@@ -438,11 +494,18 @@ def _root_variables():
         f"--gs-accent:{t['accent']};"
         f"--gs-accent-2:{t['accent_2']};"
         f"--gs-accent-3:{t['accent_3']};"
+        f"--gs-deep:{t['deep']};"
+        f"--gs-hot:{t['hot']};"
+        f"--gs-c1:{t['c1']};"
+        f"--gs-c2:{t['c2']};"
+        f"--gs-c3:{t['c3']};"
         f"--gs-success:{t['success']};"
         f"--gs-warning:{t['warning']};"
         f"--gs-danger:{t['danger']};"
-        "--gs-accent-soft:rgba(110,123,255,0.14);"
-        "--gs-accent-line:rgba(129,140,255,0.55);"
+        f"{blobs}"
+        "--gs-accent-soft:rgba(var(--gs-c1),0.14);"
+        "--gs-accent-line:rgba(var(--gs-c1),0.55);"
+        "--gs-card:linear-gradient(145deg,rgba(25,25,25,0.95),rgba(16,16,16,0.95));"
         f"--gs-font:{FONT_STACK};"
         f"--gs-mono:{MONO_STACK};"
         "--gs-ease:cubic-bezier(.2,.7,.2,1);"
@@ -495,123 +558,248 @@ footer { display: none !important; }
 [data-testid="stMainBlockContainer"],
 .block-container {
     max-width: 1200px;
-    padding: 2.25rem 1.75rem 5rem;
+    padding: 0.75rem 1.75rem 5rem;
 }
 
 * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.16) transparent; }
-::selection { background: rgba(117,131,255,0.35); }
+::selection { background: rgba(var(--gs-c1),0.35); }
 
 .gs-i { display: block; flex: none; }
 
 
-.stApp::before {
-    content: "";
-    position: fixed;
-    inset: -25%;
-    z-index: 0;
-    pointer-events: none;
-    background:
-        radial-gradient(38% 34% at 22% 24%, rgba(96,110,255,0.17), transparent 70%),
-        radial-gradient(34% 30% at 78% 16%, rgba(143,123,255,0.13), transparent 70%),
-        radial-gradient(40% 36% at 62% 84%, rgba(79,157,255,0.10), transparent 70%);
-    animation: gs-drift 52s ease-in-out infinite alternate;
-    will-change: transform;
-}
-
+.stApp::before,
 .stApp::after {
     content: "";
     position: fixed;
-    top: -56px; right: 0; bottom: 0; left: 0;
+    inset: 0;
     z-index: 0;
     pointer-events: none;
-    background-image:
-        linear-gradient(rgba(255,255,255,0.032) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,0.032) 1px, transparent 1px);
-    background-size: 56px 56px;
-    -webkit-mask-image: radial-gradient(ellipse 75% 60% at 50% 0%, #000 0%, transparent 78%);
-    mask-image: radial-gradient(ellipse 75% 60% at 50% 0%, #000 0%, transparent 78%);
-    animation: gs-grid 110s linear infinite;
+    background-repeat: no-repeat;
     will-change: transform;
 }
 
-@keyframes gs-drift {
-    from { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
-    to   { transform: translate3d(3%, -2%, 0) rotate(8deg) scale(1.08); }
+.stApp::before {
+    background-size: 50vmax 50vmax, 50vmax 50vmax, 50vmax 50vmax;
+    background-position: -10vmax -14vmax, calc(100vw - 34vmax) -6vmax, 24vmax 28vmax;
+    background-image:
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g1) 38%, transparent), transparent),
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g2) 26%, transparent), transparent),
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g3) 16%, transparent), transparent);
+    animation: gs-aurora-a 44s ease-in-out infinite alternate;
 }
 
-@keyframes gs-grid {
-    from { transform: translate3d(0, 0, 0); }
-    to   { transform: translate3d(0, 56px, 0); }
+.stApp::after {
+    background-size: 50vmax 50vmax, 50vmax 50vmax;
+    background-position: calc(100vw - 54vmax) calc(100vh - 24vmax), -16vmax calc(100vh - 24vmax);
+    background-image:
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g4) 18%, transparent), transparent),
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g5) 22%, transparent), transparent);
+    animation: gs-aurora-b 70s ease-in-out infinite alternate-reverse;
 }
 
-
-.gs-hero {
-    position: relative;
-    display: flex;
-    align-items: flex-start;
-    gap: 18px;
-    padding: 4px 2px 26px;
-    margin-bottom: 4px;
-}
-
-.gs-hero::after {
+[data-testid="stAppViewContainer"]::before {
     content: "";
-    position: absolute;
-    left: 0; right: 0; bottom: 0;
-    height: 1px;
-    background: linear-gradient(90deg, var(--gs-accent-line), rgba(255,255,255,0.06) 45%, transparent);
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(120% 90% at 50% 0%, transparent 40%, color-mix(in srgb, var(--gs-bg) 55%, transparent));
 }
 
-.gs-mark {
-    position: relative;
-    flex: none;
-    width: 54px; height: 54px;
-    margin-top: 4px;
-    display: grid;
-    place-items: center;
-    border-radius: 16px;
-    background: linear-gradient(140deg, #4f8cff 0%, #7a6cf6 55%, #a07af8 100%);
-    box-shadow:
-        0 12px 32px -8px rgba(110,123,255,0.6),
-        inset 0 1px 0 rgba(255,255,255,0.28);
+@keyframes gs-aurora-a {
+    from { transform: translate3d(0, 0, 0) scale(1); }
+    to   { transform: translate3d(6vmax, 4vmax, 0) scale(1.08); }
 }
+
+@keyframes gs-aurora-b {
+    from { transform: translate3d(0, 0, 0) scale(1); }
+    to   { transform: translate3d(-5vmax, -4vmax, 0) scale(1.1); }
+}
+
+
+div.st-key-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    min-height: 64px;
+    margin-bottom: 1.1rem;
+    padding: 0 4rem 0 0;
+    border-bottom: 1px solid var(--gs-border);
+    background: color-mix(in srgb, var(--gs-bg) 88%, transparent);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+}
+
+.stApp:has([data-testid="stSidebar"][aria-expanded="false"]) div.st-key-topbar { padding-left: 2.75rem; }
+
+.gs-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.gs-breadcrumb span { color: var(--gs-text-3); }
+.gs-breadcrumb strong { color: var(--gs-text-2); font-weight: 500; }
+.gs-breadcrumb .gs-breadcrumb__sep { color: var(--gs-border-strong); }
+
+.gs-pagehead { padding: 6px 2px 8px; }
 
 .gs-title {
     margin: 0;
-    font-size: 2.55rem;
-    line-height: 1.05;
-    font-weight: 700;
-    letter-spacing: -0.035em;
-    background: linear-gradient(180deg, #ffffff 10%, #bfc8ff 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    filter: drop-shadow(0 0 22px rgba(110,123,255,0.35));
+    font-size: 2rem;
+    line-height: 1.15;
+    font-weight: 600;
+    letter-spacing: -0.8px;
+    color: var(--gs-text);
 }
 
 .gs-subtitle {
     margin-top: 8px;
-    font-size: 1.04rem;
+    font-size: 0.95rem;
     color: var(--gs-text-2);
-    letter-spacing: -0.005em;
 }
 
 .gs-lede {
     margin-top: 6px;
-    font-size: 0.92rem;
+    font-size: 0.86rem;
     color: var(--gs-text-3);
     max-width: 68ch;
     line-height: 1.55;
 }
 
+[data-testid="stSidebar"] {
+    background: rgba(10,10,10,0.96) !important;
+    border-right: 1px solid var(--gs-border);
+}
+
+[data-testid="stSidebar"][aria-expanded="true"] {
+    width: 228px !important;
+    min-width: 228px !important;
+    max-width: 228px !important;
+}
+
+[data-testid="stSidebarContent"] { background: transparent !important; }
+
+[data-testid="stSidebarHeader"] {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.5rem;
+    z-index: 2;
+    width: auto;
+    height: auto;
+    padding: 0;
+}
+
+[data-testid="stSidebarUserContent"] { padding: 0.9rem 0.75rem 1rem; }
+
+div.st-key-sb_shell { min-height: calc(100vh - 3rem); gap: 0 !important; }
+div.st-key-sb_status { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--gs-border); }
+
+.gs-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 22px; }
+
+.gs-brand__mark {
+    position: relative;
+    flex: none;
+    width: 34px; height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    color: #fff;
+    background: linear-gradient(145deg, var(--gs-deep), var(--gs-accent-2) 68%, var(--gs-accent));
+    box-shadow: 0 0 28px rgba(var(--gs-c2),0.16);
+    border: 1px solid rgba(255,255,255,0.2);
+}
+
+.gs-brand__name { font-size: 1.06rem; font-weight: 700; letter-spacing: -0.6px; white-space: nowrap; color: var(--gs-text); }
+.gs-brand__name span { color: var(--gs-accent); }
+
+.gs-nav { display: block; }
+.gs-nav__group { margin: 0 0 17px; }
+
+.gs-nav__label {
+    display: block;
+    padding: 0 12px 7px;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--gs-text-3);
+    white-space: nowrap;
+}
+
+[data-testid="stSidebar"] a.gs-nav__item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    height: 38px;
+    padding: 0 11px;
+    border-radius: 9px;
+    color: #888 !important;
+    font-size: 0.76rem;
+    text-decoration: none !important;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: background .18s var(--gs-ease), color .18s var(--gs-ease);
+}
+
+.gs-nav__item span { overflow: hidden; text-overflow: ellipsis; }
+
+[data-testid="stSidebar"] a.gs-nav__item:hover { background: #151515; color: #ddd !important; }
+
+[data-testid="stSidebar"] a.gs-nav__item:focus,
+[data-testid="stSidebar"] a.gs-nav__item:active {
+    outline: none;
+    color: #fff !important;
+    background: linear-gradient(90deg, rgba(var(--gs-c3),0.66), rgba(var(--gs-c2),0.2) 75%, rgba(var(--gs-c1),0.04));
+}
+
+[data-testid="stSidebar"] a.gs-nav__item:focus::before,
+[data-testid="stSidebar"] a.gs-nav__item:active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    height: 18px;
+    width: 2px;
+    border-radius: 3px;
+    background: var(--gs-accent);
+    box-shadow: 0 0 12px var(--gs-accent);
+}
+
+.gs-sbstatus {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--gs-border);
+    border-radius: 10px;
+    background: var(--gs-field);
+    overflow: hidden;
+}
+
+.gs-sbstatus i {
+    flex: none;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--gs-accent);
+    box-shadow: 0 0 10px var(--gs-accent);
+}
+
+.gs-sbstatus div { display: flex; flex-direction: column; min-width: 0; }
+.gs-sbstatus strong { font-size: 0.66rem; font-weight: 600; color: var(--gs-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gs-sbstatus span { margin-top: 2px; font-size: 0.6rem; color: var(--gs-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+[data-testid="stMain"], section.main { scroll-behavior: smooth; }
+
 
 div.st-key-control_panel,
 div.st-key-compare_panel {
-    background:
-        linear-gradient(180deg, rgba(255,255,255,0.022), rgba(255,255,255,0) 40%),
-        var(--gs-surface);
+    background: var(--gs-card);
     border: 1px solid var(--gs-border);
-    border-radius: 20px;
+    border-radius: 15px;
     padding: 26px 26px 24px;
     box-shadow: var(--gs-shadow);
     gap: 1.6rem !important;
@@ -631,9 +819,9 @@ div.st-key-compare_panel {
 
 div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"],
 div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"] {
-    background: var(--gs-surface-2) !important;
+    background: var(--gs-field) !important;
     border: 1px solid var(--gs-border-strong) !important;
-    border-radius: 13px !important;
+    border-radius: 10px !important;
     min-height: 54px;
     transition: border-color .18s var(--gs-ease), box-shadow .18s var(--gs-ease), background .18s var(--gs-ease);
 }
@@ -641,19 +829,19 @@ div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"] {
 div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="base-input"],
 div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="base-input"] {
     background: transparent !important;
-    border-radius: 13px !important;
+    border-radius: 10px !important;
 }
 
 div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:hover,
 div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"]:hover {
-    border-color: rgba(129,140,255,0.42) !important;
+    border-color: rgba(var(--gs-c1),0.42) !important;
 }
 
 div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
 div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {
     border-color: var(--gs-accent) !important;
     background: var(--gs-surface-3) !important;
-    box-shadow: 0 0 0 4px rgba(110,123,255,0.17), 0 0 30px -8px rgba(110,123,255,0.5) !important;
+    box-shadow: 0 0 0 4px rgba(var(--gs-c2),0.17), 0 0 30px -8px rgba(var(--gs-c2),0.5) !important;
 }
 
 div.st-key-repo_field [data-testid="stTextInput"] input,
@@ -682,10 +870,10 @@ div.st-key-compare_field [data-testid="stTextInput"] input::placeholder {
 div.st-key-module_grid {
     display: grid !important;
     grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
-    gap: 14px !important;
+    gap: 12px !important;
 }
 
-div[class*="st-key-apick_"] { position: relative; gap: 0 !important; min-height: 132px; }
+div[class*="st-key-apick_"] { position: relative; gap: 0 !important; }
 
 div[class*="st-key-apick_"] [data-testid="stElementContainer"] { position: static; margin: 0; }
 
@@ -696,8 +884,7 @@ div[class*="st-key-apick_"] [data-testid="stButton"] {
     
     position: absolute;
     top: 0; left: 0; right: 0;
-    bottom: 0;
-    height: auto;
+    height: 112px;
     z-index: 3;
 }
 
@@ -715,7 +902,7 @@ div[class*="st-key-apick_"] [data-testid="stButton"] button {
     display: flex;
     align-items: flex-start;
     gap: 14px;
-    min-height: 128px;
+    min-height: 96px;
     padding: 16px 44px 16px 16px;
     border: 1px solid var(--gs-border);
     border-radius: 14px;
@@ -725,7 +912,7 @@ div[class*="st-key-apick_"] [data-testid="stButton"] button {
 }
 
 div[class*="st-key-apick_"]:hover .gs-pick {
-    border-color: rgba(129,140,255,0.4);
+    border-color: rgba(var(--gs-c1),0.4);
     background: var(--gs-surface-3);
     transform: translateY(-1px);
 }
@@ -737,9 +924,9 @@ div[class*="st-key-apick_"]:has(button:focus-visible) .gs-pick {
 
 .gs-pick--on,
 div[class*="st-key-apick_"]:hover .gs-pick--on {
-    border-color: rgba(129,140,255,0.7);
-    background: linear-gradient(180deg, rgba(110,123,255,0.20), rgba(110,123,255,0.07));
-    box-shadow: 0 0 0 1px rgba(129,140,255,0.25) inset, 0 14px 34px -16px rgba(110,123,255,0.65);
+    border-color: rgba(var(--gs-c1),0.7);
+    background: linear-gradient(180deg, rgba(var(--gs-c2),0.20), rgba(var(--gs-c2),0.07));
+    box-shadow: 0 0 0 1px rgba(var(--gs-c1),0.25) inset, 0 14px 34px -16px rgba(var(--gs-c2),0.65);
 }
 
 .gs-pick__icon {
@@ -755,8 +942,8 @@ div[class*="st-key-apick_"]:hover .gs-pick--on {
 
 .gs-pick--on .gs-pick__icon {
     color: #fff;
-    background: linear-gradient(140deg, #4f8cff, #8f7bff);
-    box-shadow: 0 6px 16px -6px rgba(110,123,255,0.8);
+    background: linear-gradient(145deg, var(--gs-deep), var(--gs-accent-2) 68%, var(--gs-accent));
+    box-shadow: 0 6px 16px -6px rgba(var(--gs-c2),0.8);
 }
 
 .gs-pick__title { font-size: 0.98rem; font-weight: 600; color: var(--gs-text); }
@@ -786,73 +973,71 @@ div[class*="st-key-dl_"] button {
     min-height: 34px;
     width: auto !important;
     padding: 0 14px;
-    border-radius: 9px;
+    border-radius: 7px;
     border: 1px solid var(--gs-border) !important;
     background: transparent !important;
     color: var(--gs-text-2) !important;
-    font-size: 0.84rem;
-    font-weight: 500;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
     white-space: nowrap;
     transition: border-color .18s var(--gs-ease), color .18s var(--gs-ease), background .18s var(--gs-ease);
 }
 
 div[class*="st-key-atool_"] button:hover,
 div[class*="st-key-dl_"] button:hover {
-    border-color: rgba(129,140,255,0.5) !important;
+    border-color: rgba(var(--gs-c1),0.5) !important;
     color: var(--gs-text) !important;
     background: var(--gs-accent-soft) !important;
 }
 
 div[class*="st-key-atool_"] button p,
-div[class*="st-key-dl_"] button p { color: inherit !important; }
-
-div[class*="st-key-dl_"] { display: flex; justify-content: flex-end; }
-
-div[class*="st-key-atool_toggle_"] button {
-    width: 34px !important;
-    min-width: 34px;
-    padding: 0 !important;
-    font-size: 15px;
+div[class*="st-key-dl_"] button p {
+    color: inherit !important;
+    font-size: inherit;
+    font-weight: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
 }
 
-div[class*="st-key-atool_"] { margin: 0; }
-
-div[class*="st-key-atools_"] { align-items: center; flex-wrap: wrap; }
+div[class*="st-key-dl_"] { display: flex; justify-content: flex-end; }
 
 .gs-foot-note { font-size: 0.88rem; color: var(--gs-text-2); line-height: 1.5; }
 .gs-foot-note b { color: var(--gs-text); font-weight: 600; }
 
 .gs-period-note {
     display:flex; align-items:center; flex-wrap:wrap; gap:9px;
-    margin-top:8px; padding:10px 12px; border:1px solid rgba(129,140,255,0.18);
-    border-radius:11px; background:rgba(110,123,255,0.055); color:var(--gs-text-2);
+    margin-top:8px; padding:10px 12px; border:1px solid rgba(var(--gs-c1),0.18);
+    border-radius:11px; background:rgba(var(--gs-c2),0.055); color:var(--gs-text-2);
     font-size:0.84rem; line-height:1.4;
 }
-.gs-period-note__icon { color:#aab4ff; display:inline-flex; }
+.gs-period-note__icon { color:var(--gs-accent-3); display:inline-flex; }
 .gs-period-note b { color:var(--gs-text); font-weight:600; }
 .gs-period-note__muted { color:var(--gs-text-3); }
 
 
 div.st-key-analyze_cta button,
 div.st-key-compare_cta button {
-    min-height: 52px;
-    padding: 0 26px;
-    border-radius: 13px;
-    border: 1px solid rgba(255,255,255,0.16) !important;
-    background: linear-gradient(135deg, #4f7cff 0%, #7568f5 55%, #9377f6 100%) !important;
+    min-height: 46px;
+    padding: 0 24px;
+    border-radius: 9px;
+    border: 1px solid rgba(var(--gs-c1),0.35) !important;
+    background: linear-gradient(110deg, var(--gs-deep), var(--gs-accent-2) 62%, var(--gs-accent)) !important;
     color: #fff !important;
-    font-size: 1rem;
-    font-weight: 600;
-    letter-spacing: -0.005em;
-    box-shadow: 0 12px 30px -10px rgba(110,123,255,0.75), inset 0 1px 0 rgba(255,255,255,0.24);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    box-shadow: 0 10px 26px -10px rgba(var(--gs-c2),0.6), inset 0 1px 0 rgba(255,255,255,0.2);
     transition: transform .18s var(--gs-ease), box-shadow .18s var(--gs-ease), filter .18s var(--gs-ease);
 }
 
 div.st-key-analyze_cta button:hover,
 div.st-key-compare_cta button:hover {
     transform: translateY(-1px);
-    filter: brightness(1.07);
-    box-shadow: 0 18px 38px -10px rgba(110,123,255,0.85), inset 0 1px 0 rgba(255,255,255,0.28);
+    filter: brightness(1.12);
+    box-shadow: 0 14px 32px -10px rgba(var(--gs-c2),0.75), inset 0 1px 0 rgba(255,255,255,0.26);
 }
 
 div.st-key-analyze_cta button:active,
@@ -860,7 +1045,7 @@ div.st-key-compare_cta button:active { transform: translateY(0); filter: brightn
 div.st-key-analyze_cta button:focus-visible,
 div.st-key-compare_cta button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 div.st-key-analyze_cta button p,
-div.st-key-compare_cta button p { color: #fff !important; font-weight: 600; }
+div.st-key-compare_cta button p { color: #fff !important; font-weight: 700; font-size: inherit; letter-spacing: inherit; text-transform: inherit; }
 
 
 div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
@@ -878,6 +1063,7 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
 }
 
 .gs-section:first-child { margin-top: 0.9rem; }
+.gs-section { scroll-margin-top: 5rem; }
 
 .gs-section__icon {
     flex: none;
@@ -885,9 +1071,9 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     display: grid;
     place-items: center;
     border-radius: 13px;
-    color: #b4bcff;
-    background: linear-gradient(180deg, rgba(110,123,255,0.22), rgba(110,123,255,0.08));
-    border: 1px solid rgba(129,140,255,0.32);
+    color: var(--gs-accent-3);
+    background: linear-gradient(180deg, rgba(var(--gs-c2),0.22), rgba(var(--gs-c2),0.08));
+    border: 1px solid rgba(var(--gs-c1),0.32);
 }
 
 .gs-section__title {
@@ -923,13 +1109,13 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     min-width: 0;
     padding: 18px 18px 16px;
     border: 1px solid var(--gs-border);
-    border-radius: 15px;
-    background: var(--gs-surface);
+    border-radius: 14px;
+    background: var(--gs-card);
     box-shadow: var(--gs-shadow);
-    transition: border-color .2s var(--gs-ease), background .2s var(--gs-ease);
+    transition: border-color .2s var(--gs-ease);
 }
 
-.gs-kpi:hover { border-color: var(--gs-border-strong); background: var(--gs-surface-2); }
+.gs-kpi:hover { border-color: var(--gs-border-strong); }
 
 .gs-kpi__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .gs-kpi__label { font-size: 0.88rem; font-weight: 500; color: var(--gs-text-2); }
@@ -939,12 +1125,12 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     display: grid;
     place-items: center;
     border-radius: 10px;
-    color: #a4afff;
+    color: var(--gs-accent-3);
     background: var(--gs-accent-soft);
 }
 
 .gs-kpi__icon--success { color: #6fd8b3; background: rgba(63,191,149,0.14); }
-.gs-kpi__icon--violet  { color: #b7a6ff; background: rgba(143,123,255,0.16); }
+.gs-kpi__icon--violet  { color: var(--gs-accent-3); background: rgba(var(--gs-c2),0.16); }
 .gs-kpi__icon--blue    { color: #8ec3ff; background: rgba(79,157,255,0.15); }
 .gs-kpi__icon--warning { color: #efc27e; background: rgba(227,169,79,0.14); }
 
@@ -970,9 +1156,9 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
 
 
 div[class*="st-key-card_"] {
-    background: var(--gs-surface);
+    background: var(--gs-card);
     border: 1px solid var(--gs-border);
-    border-radius: 18px;
+    border-radius: 14px;
     padding: 20px 22px 16px;
     box-shadow: var(--gs-shadow);
     gap: 0.8rem !important;
@@ -1010,8 +1196,8 @@ div[class*="st-key-card_"] {
 }
 
 .gs-table-toggle button:hover {
-    border-color: rgba(117,131,255,0.42) !important;
-    background: rgba(117,131,255,0.10) !important;
+    border-color: rgba(var(--gs-c1),0.42) !important;
+    background: rgba(var(--gs-c1),0.10) !important;
     color: var(--gs-text) !important;
 }
 
@@ -1022,8 +1208,8 @@ div[class*="st-key-table-collapsed-"] {
     padding: 7px 10px;
     box-shadow: var(--gs-shadow);
     min-width: 0;
-    margin-top: 0.15rem;
-    margin-bottom: 0.15rem;
+    margin-top: 0;
+    margin-bottom: 0;
 }
 
 div[class*="st-key-table-collapsed-"] [data-testid="stHorizontalBlock"] {
@@ -1055,8 +1241,8 @@ div[class*="st-key-table-collapsed-"] button {
 }
 
 div[class*="st-key-table-collapsed-"] button:hover {
-    border-color: rgba(117,131,255,0.42) !important;
-    background: rgba(117,131,255,0.10) !important;
+    border-color: rgba(var(--gs-c1),0.42) !important;
+    background: rgba(var(--gs-c1),0.10) !important;
     color: var(--gs-text) !important;
 }
 
@@ -1072,9 +1258,9 @@ div[class*="st-key-table-collapsed-"] button:hover {
 }
 
 .gs-expand-btn button:hover {
-    border-color: rgba(117,131,255,0.42);
+    border-color: rgba(var(--gs-c1),0.42);
     color: var(--gs-text);
-    background: rgba(117,131,255,0.10);
+    background: rgba(var(--gs-c1),0.10);
 }
 
 
@@ -1089,9 +1275,9 @@ div[class*="st-key-table-collapsed-"] button:hover {
     gap: 14px;
     padding: 16px 18px 16px 22px;
     border-radius: 15px;
-    border: 1px solid rgba(129,140,255,0.2);
+    border: 1px solid rgba(var(--gs-c1),0.2);
     background:
-        linear-gradient(135deg, rgba(110,123,255,0.10), rgba(143,123,255,0.03) 65%),
+        linear-gradient(135deg, rgba(var(--gs-c2),0.10), rgba(var(--gs-c2),0.03) 65%),
         var(--gs-surface);
     box-shadow: var(--gs-shadow);
 }
@@ -1102,15 +1288,15 @@ div[class*="st-key-table-collapsed-"] button:hover {
     left: 0; top: 14px; bottom: 14px;
     width: 3px;
     border-radius: 0 3px 3px 0;
-    background: linear-gradient(180deg, #4f8cff, #8f7bff);
+    background: linear-gradient(180deg, var(--gs-accent), var(--gs-accent-2));
 }
 
-.gs-insight__icon { flex: none; margin-top: 2px; color: #a4afff; }
+.gs-insight__icon { flex: none; margin-top: 2px; color: var(--gs-accent-3); }
 .gs-insight__title { font-size: 0.86rem; font-weight: 500; color: var(--gs-text-2); }
 .gs-insight__body { margin-top: 4px; font-size: 0.97rem; line-height: 1.55; color: var(--gs-text); }
 .gs-insight__body strong { font-weight: 600; color: #fff; }
 
-.gs-insights-title { margin: 0.6rem 0 0.8rem; font-size: 1rem; font-weight: 600; color: var(--gs-text); }
+.gs-insights-title { margin: 0.3rem 0 0.1rem; font-size: 1rem; font-weight: 600; color: var(--gs-text); }
 
 
 .gs-repo {
@@ -1119,11 +1305,11 @@ div[class*="st-key-table-collapsed-"] button:hover {
     align-items: flex-start;
     gap: 18px;
     padding: 24px 26px;
-    border-radius: 20px;
+    border-radius: 15px;
     border: 1px solid var(--gs-border);
     background:
-        radial-gradient(110% 150% at 0% 0%, rgba(110,123,255,0.16), transparent 58%),
-        var(--gs-surface);
+        radial-gradient(110% 150% at 0% 0%, rgba(var(--gs-c2),0.16), transparent 58%),
+        var(--gs-card);
     box-shadow: var(--gs-shadow);
     overflow: hidden;
 }
@@ -1163,7 +1349,7 @@ div[class*="st-key-table-collapsed-"] button:hover {
 }
 
 .gs-repo__name a { color: var(--gs-text); text-decoration: none; transition: color .18s var(--gs-ease); }
-.gs-repo__name a:hover { color: #b9c1ff; }
+.gs-repo__name a:hover { color: var(--gs-accent-3); }
 .gs-repo__name .owner { color: var(--gs-text-2); font-weight: 500; }
 .gs-repo__name .sep { color: var(--gs-text-3); font-weight: 400; padding: 0 2px; }
 
@@ -1182,7 +1368,7 @@ div[class*="st-key-table-collapsed-"] button:hover {
     border: 1px solid var(--gs-border);
 }
 
-.gs-chip--topic { color: #b4bcff; background: rgba(110,123,255,0.10); border-color: rgba(129,140,255,0.22); }
+.gs-chip--topic { color: var(--gs-accent-3); background: rgba(var(--gs-c2),0.10); border-color: rgba(var(--gs-c1),0.22); }
 .gs-chip--warn { color: #efc27e; background: rgba(227,169,79,0.10); border-color: rgba(227,169,79,0.25); }
 
 
@@ -1263,7 +1449,7 @@ div[class*="st-key-table-collapsed-"] button:hover {
     place-items: center;
     margin-bottom: 6px;
     border-radius: 14px;
-    color: #a4afff;
+    color: var(--gs-accent-3);
     background: var(--gs-accent-soft);
 }
 
@@ -1285,7 +1471,7 @@ div[class*="st-key-table-collapsed-"] button:hover {
     flex: none;
     width: 24px; height: 24px;
     border-radius: 50%;
-    border: 2.5px solid rgba(129,140,255,0.22);
+    border: 2.5px solid rgba(var(--gs-c1),0.22);
     border-top-color: var(--gs-accent);
     animation: gs-spin .85s linear infinite;
 }
@@ -1351,7 +1537,7 @@ div[class*="st-key-table-collapsed-"] button:hover {
     overflow-wrap: anywhere;
 }
 
-a.gs-tl__tag:hover { color: #b9c1ff; }
+a.gs-tl__tag:hover { color: var(--gs-accent-3); }
 .gs-tl__name { margin-top: 2px; font-size: 0.86rem; color: var(--gs-text-2); overflow-wrap: anywhere; }
 .gs-tl__meta { margin-top: 2px; font-size: 0.8rem; color: var(--gs-text-3); }
 
@@ -1359,9 +1545,9 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-pill--warn { color: #efc27e; background: rgba(227,169,79,0.12); border: 1px solid rgba(227,169,79,0.25); }
 .gs-pill--muted { color: var(--gs-text-2); background: rgba(255,255,255,0.05); border: 1px solid var(--gs-border); }
 
-.gs-method { display: flex; flex-direction: column; margin-top: 8px; }
+.gs-method { display: flex; flex-direction: column; }
 .gs-method__row { display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid var(--gs-border); }
-.gs-method__row:first-child { border-top: 0; padding-top: 8px; }
+.gs-method__row:first-child { border-top: 0; padding-top: 2px; }
 .gs-method__name { flex: 0 0 150px; font-size: 0.92rem; font-weight: 600; color: var(--gs-text); }
 .gs-method__weight { display: block; margin-top: 2px; font-size: 0.78rem; font-weight: 400; color: var(--gs-text-3); }
 .gs-method__body { min-width: 0; flex: 1; font-size: 0.86rem; line-height: 1.5; color: var(--gs-text-2); }
@@ -1398,7 +1584,7 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 }
 
 .gs-stage__dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--gs-text-3); }
-.gs-stage--running .gs-stage__dot { background: var(--gs-accent); box-shadow: 0 0 0 4px rgba(110,123,255,0.22); }
+.gs-stage--running .gs-stage__dot { background: var(--gs-accent); box-shadow: 0 0 0 4px rgba(var(--gs-c2),0.22); }
 .gs-stage--done .gs-stage__dot { background: var(--gs-success); }
 .gs-stage--failed .gs-stage__dot { background: var(--gs-danger); }
 .gs-stage__name { flex: 1; min-width: 0; font-weight: 500; color: var(--gs-text); }
@@ -1451,10 +1637,51 @@ div[data-testid="stSelectboxVirtualDropdown"] [role="option"] * {
 }
 
 
+div.st-key-theme_picker { width: auto; }
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] {
+    width: auto;
+    gap: 3px;
+    padding: 3px;
+    background: var(--gs-field);
+    border: 1px solid var(--gs-border);
+    border-radius: 9px;
+}
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button {
+    min-height: 26px;
+    padding: 0 10px;
+    border: 0 !important;
+    border-radius: 6px;
+    background: transparent !important;
+    color: var(--gs-text-3) !important;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+}
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button p {
+    color: inherit !important;
+    font-size: inherit;
+    font-weight: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+}
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button:hover { color: var(--gs-text) !important; }
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button[aria-checked="true"],
+div.st-key-theme_picker [data-testid="stButtonGroup"] button[data-testid$="Active"] {
+    background: rgba(var(--gs-c1),0.18) !important;
+    color: var(--gs-accent-3) !important;
+    box-shadow: inset 0 0 0 1px rgba(var(--gs-c1),0.3);
+}
+
+
 @media (max-width: 900px) {
-    [data-testid="stMainBlockContainer"], .block-container { padding: 1.5rem 1rem 4rem; }
-    .gs-title { font-size: 2.05rem; }
-    .gs-mark { width: 46px; height: 46px; border-radius: 14px; }
+    [data-testid="stMainBlockContainer"], .block-container { padding: 0.5rem 1rem 4rem; }
+    .gs-title { font-size: 1.7rem; }
     div.st-key-control_panel, div.st-key-compare_panel { padding: 18px 16px; border-radius: 16px; }
     div[class*="st-key-card_"] { padding: 16px 14px 12px; border-radius: 16px; }
     .gs-repo { flex-direction: column; padding: 20px 18px; }
@@ -1465,7 +1692,6 @@ div[data-testid="stSelectboxVirtualDropdown"] [role="option"] * {
 }
 
 @media (max-width: 520px) {
-    .gs-hero { align-items: flex-start; }
     .gs-method__row { flex-direction: column; gap: 6px; }
     .gs-method__name { flex: none; }
     .gs-lede { display: none; }
@@ -1473,6 +1699,7 @@ div[data-testid="stSelectboxVirtualDropdown"] [role="option"] * {
 }
 
 @media (prefers-reduced-motion: reduce) {
+    [data-testid="stMain"], section.main { scroll-behavior: auto !important; }
     .stApp::before, .stApp::after, div.st-key-results,
     .gs-spinner, .gs-loader__bar::after, .gs-skel { animation: none !important; }
     .gs-pick, .gs-kpi, div.st-key-analyze_cta button { transition: none !important; }
@@ -1488,30 +1715,144 @@ def inject_styles():
         unsafe_allow_html=True
     )
 
+def render_theme_picker():
+
+    with st.container(key="theme_picker"):
+
+        st.segmented_control(
+            "Theme",
+            options=list(THEMES),
+            key="theme",
+            label_visibility="collapsed",
+        )
+
+
 def hero():
 
+    crumbs = (
+        '<span>RepoMetric</span><span class="gs-breadcrumb__sep">/</span>'
+        '<strong>Analyzer</strong>'
+    )
+
+    if st.session_state.get("analysis") is not None and st.session_state.get("analyzed_owner"):
+
+        full_name = f"{st.session_state.analyzed_owner}/{st.session_state.analyzed_repo}"
+        crumbs += f'<span class="gs-breadcrumb__sep">/</span><strong>{esc(full_name)}</strong>'
+
+    with st.container(
+        key="topbar",
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
+    ):
+        render_html(f'<div class="gs-breadcrumb">{crumbs}</div>')
+        render_theme_picker()
+
     render_html(f"""
-    <div class="gs-hero">
-        <div class="gs-mark">{icon('search', 26, 2.1)}</div>
-        <div>
-            <h1 class="gs-title">RepoMetric</h1>
-            <div class="gs-subtitle">GitHub Repository Activity &amp; Collaboration Analyzer</div>
-            <div class="gs-lede">
-                Point it at any public repository to pull commit activity, contributor
-                concentration, issue and pull request health, language mix and release
-                history straight from the GitHub API.
-            </div>
+    <div class="gs-pagehead">
+        <h1 class="gs-title">RepoMetric</h1>
+        <div class="gs-subtitle">GitHub Repository Activity &amp; Collaboration Analyzer</div>
+        <div class="gs-lede">
+            Point it at any public repository to pull commit activity, contributor
+            concentration, issue and pull request health, language mix and release
+            history straight from the GitHub API.
         </div>
     </div>
     """)
 
 
+def render_sidebar():
+
+    groups = []
+    placed = set()
+
+    for label, titles in NAV_GROUPS:
+
+        items = [(t, *NAV_SECTIONS[t]) for t in titles if t in NAV_SECTIONS]
+        placed.update(t for t, *_ in items)
+
+        if items:
+            groups.append((label, items))
+
+    leftover = [(t, *v) for t, v in NAV_SECTIONS.items() if t not in placed]
+
+    if leftover:
+        groups.append(("More", leftover))
+
+    nav_html = "".join(
+        '<div class="gs-nav__group">'
+        f'<span class="gs-nav__label">{esc(label)}</span>'
+        + "".join(
+            f'<a class="gs-nav__item" href="#{slug}" target="_self">'
+            f'{icon(icon_name, 16, 1.9)}<span>{esc(title)}</span></a>'
+            for title, slug, icon_name in items
+        )
+        + "</div>"
+        for label, items in groups
+    )
+
+    analysis = st.session_state.get("analysis")
+
+    if analysis is not None and st.session_state.get("analyzed_owner"):
+        status_title = f"{st.session_state.analyzed_owner}/{st.session_state.analyzed_repo}"
+        status_text = f"Fetched {fmt_date(analysis.get('fetched_at'), with_time=True)} UTC"
+    else:
+        status_title = "No data loaded"
+        status_text = "Waiting for a repository"
+
+    with st.sidebar:
+
+        with st.container(key="sb_shell"):
+
+            render_html(f"""
+            <div class="gs-brand">
+                <div class="gs-brand__mark">{icon('search', 18, 2.2)}</div>
+                <div class="gs-brand__name">Repo<span>Metric</span></div>
+            </div>
+            """)
+
+            if nav_html:
+                render_html(f'<nav class="gs-nav">{nav_html}</nav>')
+
+            with st.container(key="sb_status"):
+
+                render_html(f"""
+                <div class="gs-sbstatus">
+                    <i></i>
+                    <div>
+                        <strong>{esc(status_title)}</strong>
+                        <span>{esc(status_text)}</span>
+                    </div>
+                </div>
+                """)
+
+
+NAV_SECTIONS = {}
+
+NAV_GROUPS = [
+    ("Overview", ["Repository Overview", "Repository Snapshot", "Repository Health Score"]),
+    ("Activity", ["Commit Analysis", "Developer Activity Heatmap", "Commit Velocity", "Contributor Analysis"]),
+    ("Issues and Pull Requests", ["Issue Analysis", "Issue Resolution", "Pull Request Analysis", "Pull Request Health"]),
+    ("Code and Releases", ["Programming Language Analysis", "Release Analysis", "Release Cadence"]),
+    ("Insights", ["Trend Detection", "Repository Timeline", "Anomaly Detection"]),
+    ("Compare and Data", ["Repository Comparison", "API Usage and Exports"]),
+]
+
+
+def section_slug(title):
+
+    return "sec-" + re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-")
+
+
 def section_header(title, description, icon_name, note=None):
+
+    slug = section_slug(title)
+    NAV_SECTIONS.setdefault(title, (slug, icon_name))
 
     note_html = f'<div class="gs-section__note">{icon("info", 14)}{esc(note)}</div>' if note else ""
 
     render_html(f"""
-    <div class="gs-section">
+    <div class="gs-section" id="{slug}">
         <div class="gs-section__icon">{icon(icon_name, 22, 1.8)}</div>
         <div style="min-width:0;">
             <div class="gs-section__title">{esc(title)}</div>
@@ -1925,31 +2266,20 @@ def render_table_tools(key, title, df, filter_columns=None, date_column=None):
     return filtered
 
 
-def card_head_html(title, subtitle=None):
-
-    sub_html = f'<div class="gs-card__sub">{esc(subtitle)}</div>' if subtitle else ""
-
-    return f"""
-    <div class="gs-card__title">{esc(title)}</div>
-    {sub_html}
-    """
-
-
 def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart", filter_columns=None, date_column=None):
 
     if fig is not None:
-        with card_open(f"{key}_chart"):
-            chart_head = st.columns([6, 1], gap="small", vertical_alignment="top")
-            with chart_head[0]:
-                render_html(card_head_html(title, subtitle))
-            with chart_head[1]:
-                with st.container(key=f"atool_expand_{key}_chart"):
-                    if st.button("Expand", key=f"{key}_chart_expand"):
-                        expanded_view(
-                            title,
-                            fig=fig,
-                            height=max(height, 520),
-                        )
+        with card_open(f"{key}_chart", title, subtitle):
+            chart_action_cols = st.columns([1, 0.12], gap="small")
+            with chart_action_cols[1]:
+                st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
+                if st.button("Expand", key=f"{key}_chart_expand", width="stretch"):
+                    expanded_view(
+                        title,
+                        fig=fig,
+                        height=max(height, 520),
+                    )
+                st.markdown('</div>', unsafe_allow_html=True)
             render_chart(fig, key=f"{key}_plot")
 
     if df is not None:
@@ -1972,30 +2302,33 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
                         st.session_state[table_state_key] = True
                         st.rerun()
         else:
-            with card_open(f"{key}_table"):
-                table_head = st.columns([8, 1.4, 0.6], gap="small", vertical_alignment="top")
-
-                with table_head[0]:
-                    render_html(card_head_html(f"{title} table", "Detailed data for this analysis."))
+            with card_open(f"{key}_table", f"{title} table", "Detailed data for this analysis."):
+                table_action_cols = st.columns([1, 0.08, 0.08], gap="small")
 
                 view_df = render_table_tools(key, title, df, filter_columns, date_column)
 
-                with table_head[1]:
-                    with st.container(key=f"atool_expand_{key}_table"):
-                        if st.button("Expand", key=f"{key}_table_expand"):
-                            expanded_view(
-                                f"{title} table",
-                                df=view_df,
-                                column_config=column_config,
-                                height=max(height, 520),
-                                column_order=column_order,
-                            )
+                with table_action_cols[1]:
+                    st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
+                    if st.button("Expand", key=f"{key}_table_expand", width="stretch"):
+                        expanded_view(
+                            f"{title} table",
+                            df=view_df,
+                            column_config=column_config,
+                            height=max(height, 520),
+                            column_order=column_order,
+                        )
+                    st.markdown('</div>', unsafe_allow_html=True)
 
-                with table_head[2]:
-                    with st.container(key=f"atool_toggle_{key}_table"):
-                        if st.button("⌃", key=f"{key}_table_toggle"):
-                            st.session_state[table_state_key] = False
-                            st.rerun()
+                with table_action_cols[2]:
+                    st.markdown('<div class="gs-table-toggle">', unsafe_allow_html=True)
+                    if st.button(
+                        "⌃",
+                        key=f"{key}_table_toggle",
+                        width="stretch",
+                    ):
+                        st.session_state[table_state_key] = False
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
 
                 if view_df.empty and not df.empty:
                     render_html('<div class="gs-empty-chart">No rows match the current search and filters.</div>')
@@ -2006,7 +2339,6 @@ def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, hei
                         height=height,
                         column_order=column_order,
                     )
-
 
 def _style_figure(fig, height=340, legend=True):
     """Apply the shared dark theme to any Plotly figure in place."""
@@ -2041,7 +2373,6 @@ def _style_figure(fig, height=340, legend=True):
         linecolor="rgba(255,255,255,0.09)",
         tickfont=dict(color=THEME["text_3"], size=11.5),
         title_font=dict(color=THEME["text_2"], size=12),
-        automargin=True,
     )
 
     fig.update_yaxes(
@@ -2050,7 +2381,6 @@ def _style_figure(fig, height=340, legend=True):
         linecolor="rgba(255,255,255,0.09)",
         tickfont=dict(color=THEME["text_3"], size=11.5),
         title_font=dict(color=THEME["text_2"], size=12),
-        automargin=True,
     )
 
     return fig
@@ -2201,43 +2531,17 @@ def languages_figure(languages_df, top_n=8):
 
         head = ordered
 
-    total = float(head["bytes"].sum()) or 1.0
-    shares = [float(value) / total * 100 for value in head["bytes"]]
-    labels = [
-        f"{name}<br>{share:.1f}%" if share >= 2.5 else ""
-        for name, share in zip(head["language"], shares)
-    ]
-    positions = [
-        "inside" if share >= 8 else ("outside" if share >= 2.5 else "none")
-        for share in shares
-    ]
-
     fig = go.Figure(go.Pie(
         labels=head["language"],
         values=head["bytes"],
         hole=0.5,
-        sort=False,
         marker=dict(colors=CHART_COLORS, line=dict(color=THEME["surface"], width=3)),
-        text=labels,
-        textinfo="text",
-        textposition=positions,
-        insidetextorientation="horizontal",
+        textinfo="label+percent",
         textfont=dict(size=12, color=THEME["text"]),
         hovertemplate="<b>%{label}</b><br>%{percent} of code<extra></extra>",
     ))
 
-    styled = _style_figure(fig, height=340)
-
-    styled.update_layout(
-        margin=dict(l=24, r=24, t=24, b=24),
-        legend=dict(
-            orientation="v",
-            yanchor="middle", y=0.5,
-            xanchor="left", x=1.02,
-        ),
-    )
-
-    return styled
+    return _style_figure(fig, height=340)
 
 
 def releases_timeline_figure(releases_df):
@@ -2252,35 +2556,17 @@ def releases_timeline_figure(releases_df):
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
-        x=[ordered["published_at"].min(), ordered["published_at"].max()],
-        y=[1, 1],
-        mode="lines",
-        line=dict(color="rgba(255,255,255,0.14)", width=2),
-        hoverinfo="skip",
-        showlegend=False,
-    ))
-
-    fig.add_trace(go.Scatter(
         x=ordered["published_at"], y=[1] * len(ordered),
-        mode="markers+text",
-        text=ordered["tag"],
-        textposition="top center",
-        textfont=dict(size=12, color=THEME["text_2"]),
-        cliponaxis=False,
+        mode="markers",
         marker=dict(size=13, color=colors, line=dict(color=THEME["surface"], width=2)),
         customdata=ordered[["tag", "name"]],
         hovertemplate="<b>%{customdata[0]}</b><br>%{x|%d %b %Y}<extra></extra>",
-        showlegend=False,
     ))
 
-    fig.update_yaxes(visible=False, range=[0.6, 1.5])
-    fig.update_xaxes(title_text=None, tickformat="%d %b %Y")
+    fig.update_yaxes(visible=False, range=[0.5, 1.5])
+    fig.update_xaxes(title_text=None)
 
-    styled = _style_figure(fig, height=190, legend=False)
-    styled.update_layout(margin=dict(l=32, r=32, t=8, b=8))
-
-    return styled
-
+    return _style_figure(fig, height=170, legend=False)
 
 def health_color(score):
 
@@ -3120,7 +3406,6 @@ def shorten(text, limit=46):
 def render_methodology(key, title, subtitle, methods, foot):
 
     rows = []
-    single = len(methods) == 1
 
     for item in methods:
 
@@ -3129,11 +3414,9 @@ def render_methodology(key, title, subtitle, methods, foot):
             for label, rule in item["rules"]
         )
 
-        name_html = "" if single else f'<div class="gs-method__name">{esc(item["name"])}</div>'
-
         rows.append(f"""
         <div class="gs-method__row">
-            {name_html}
+            <div class="gs-method__name">{esc(item['name'])}</div>
             <div class="gs-method__body">{esc(item['summary'])}{rules}</div>
         </div>
         """)
@@ -3947,12 +4230,16 @@ def init_state():
         "compare_period": COMPARISON_DEFAULT_PERIOD,
         "comparison": None,
         "compare_error": None,
+        "theme": DEFAULT_THEME,
     }
 
     for key, value in defaults.items():
 
         if key not in st.session_state:
             st.session_state[key] = value
+
+    if st.session_state.get("theme") not in THEMES:
+        st.session_state["theme"] = DEFAULT_THEME
 
 
 def toggle_analysis(name):
@@ -3983,19 +4270,21 @@ def render_control_panel():
                 label_visibility="collapsed",
             )
 
-        top = st.columns([1, 1], gap="small", vertical_alignment="center")
+        top = st.columns([1, 1], gap="small")
 
         with top[0]:
             render_html('<div class="gs-field-label"><b>Analyses to run</b></div>')
 
         with top[1]:
 
-            with st.container(horizontal=True, horizontal_alignment="right", gap="small", key="atools_row_all"):
+            tool_cols = st.columns([1, 1, 6], gap="small")
 
+            with tool_cols[0]:
                 with st.container(key="atool_all"):
                     if st.button("Select all", key="select_all_btn"):
                         st.session_state.selected = set(ANALYSIS_OPTIONS)
 
+            with tool_cols[1]:
                 with st.container(key="atool_clear"):
                     if st.button("Clear", key="clear_all_btn"):
                         st.session_state.selected = set()
@@ -4883,14 +5172,16 @@ def render_data_status(analysis, owner, repo, selected):
         render_html(fetched_status_html(analysis))
         render_rate_limit_bar(analysis)
 
-        signature = (owner, repo, st.session_state.analysis_stamp, tuple(sorted(selected)))
-        ready = st.session_state.workbook_ready
-        prepare_clicked = False
+        cols = st.columns([1, 1.6, 4], gap="small", vertical_alignment="center")
 
-        with st.container(horizontal=True, vertical_alignment="center", gap="small", key="atools_row_data"):
-
+        with cols[0]:
             with st.container(key="atool_refresh"):
                 st.button("Refresh data", key="refresh_btn", on_click=request_refresh)
+
+        signature = (owner, repo, st.session_state.analysis_stamp, tuple(sorted(selected)))
+        ready = st.session_state.workbook_ready
+
+        with cols[1]:
 
             if ready is not None and ready["signature"] == signature:
                 st.download_button(
@@ -4902,21 +5193,17 @@ def render_data_status(analysis, owner, repo, selected):
                     on_click="ignore",
                 )
 
-            else:
-                with st.container(key="atool_prepare"):
-                    prepare_clicked = st.button("Prepare Excel workbook", key="dl_all_xlsx_prep")
+            elif st.button("Prepare Excel workbook", key="dl_all_xlsx_prep"):
 
-        if prepare_clicked:
+                with st.spinner("Building the workbook"):
+                    data, notes = tables_to_excel_bytes(export_tables(analysis, selected))
 
-            with st.spinner("Building the workbook"):
-                data, notes = tables_to_excel_bytes(export_tables(analysis, selected))
-
-            st.session_state.workbook_ready = {
-                "signature": signature,
-                "data": data,
-                "notes": notes,
-            }
-            st.rerun()
+                st.session_state.workbook_ready = {
+                    "signature": signature,
+                    "data": data,
+                    "notes": notes,
+                }
+                st.rerun()
 
         if ready is not None and ready["signature"] == signature and ready["notes"]:
             notice("warning", "Some tables were shortened", " ".join(ready["notes"]))
@@ -4996,10 +5283,9 @@ def render_live_rate_limit():
                 f'<div class="gs-rate__foot">{" · ".join(foot)}</div></div>'
             )
 
-        with st.container(key="atool_check"):
-            if st.button("Check now", key="rate_limit_check"):
-                cached_rate_limit_status.clear()
-                st.rerun(scope="fragment")
+        if st.button("Check now", key="rate_limit_check"):
+            cached_rate_limit_status.clear()
+            st.rerun(scope="fragment")
 
 
 def render_api_usage(analysis):
@@ -5213,7 +5499,7 @@ def repository_timeline_figure(timeline):
             hovertemplate="Release <b>%{customdata[0]}</b><extra></extra>",
         ))
 
-    fig.update_xaxes(title_text=None, dtick="M1", tickformat="%b %Y", ticklabelmode="period")
+    fig.update_xaxes(title_text=None)
 
     if has_bars:
         fig.update_yaxes(title_text="Commits", rangemode="tozero")
@@ -5671,8 +5957,9 @@ def render_results():
 
 def main():
 
-    inject_styles()
     init_state()
+    apply_theme(st.session_state.theme)
+    inject_styles()
     hero()
 
     analyze_clicked = render_control_panel()
@@ -5714,6 +6001,8 @@ def main():
             "and select Analyze repository to pull live data from the GitHub API.",
             "search",
         )
+
+    render_sidebar()
 
 
 if __name__ == "__main__":
