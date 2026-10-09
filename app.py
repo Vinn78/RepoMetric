@@ -20,6 +20,8 @@ Layout of this file
 
 import html
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime
 from urllib.parse import quote
@@ -29,64 +31,164 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
-from github_api import PERIOD_OPTIONS, analyze_repository
-
-
-# ==============================
-# Page Configuration
-# ==============================
+from data_processor import (
+    LEADERBOARD_FOOT,
+    LEADERBOARD_METHODS,
+    SNAPSHOT_FOOT,
+    SNAPSHOT_METHODS,
+    TABLE_FILTER_MAX_OPTIONS,
+    TREND_FOOT,
+    TREND_METHODS,
+    ANOMALY_BASELINE_WEEKS,
+    ANOMALY_FOOT,
+    ANOMALY_LABELS,
+    ANOMALY_METHODS,
+    ANOMALY_MIN_BASELINE_WEEKS,
+    TIMELINE_FOOT,
+    TIMELINE_METHODS,
+    TREND_MIN_EVENTS,
+    build_summary_metrics_table,
+    calculate_snapshot_areas,
+    TABLE_SEARCH_MIN_ROWS,
+    TABLE_TOOLS_FOOT,
+    TABLE_TOOLS_METHODS,
+    dataframe_to_csv_bytes,
+    COMPARISON_DEFAULT_PERIOD,
+    COMPARISON_FOOT,
+    COMPARISON_METHODS,
+    HEATMAP_FOOT,
+    HEATMAP_METHODS,
+    build_repository_comparison,
+    filter_table,
+    tables_to_excel_bytes,
+    ISSUE_RESOLUTION_FOOT,
+    ISSUE_RESOLUTION_METHODS,
+    PR_HEALTH_FOOT,
+    PR_HEALTH_METHODS,
+    RELEASE_CADENCE_FOOT,
+    RELEASE_CADENCE_METHODS,
+    STALE_ISSUE_DAYS,
+    STALE_PR_DAYS,
+    VELOCITY_FOOT,
+    VELOCITY_METHODS,
+)
+from github_api import (
+    ANALYSIS_CACHE_TTL_SECONDS,
+    GITHUB_TOKEN,
+    PERIOD_OPTIONS,
+    RATE_LIMIT_FOOT,
+    RATE_LIMIT_METHODS,
+    AccessDeniedError,
+    AuthError,
+    GraphQLError,
+    NetworkError,
+    NotFoundError,
+    RateLimitError,
+    RunTracker,
+    ServerError,
+    analyze_repository,
+    get_rate_limit_status,
+)
 
 st.set_page_config(
     page_title="RepoMetric",
     page_icon="🔎",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+DEFAULT_THEME = "Indigo"
 
-# ==============================
-# 1. Design Tokens
-# ==============================
-
-THEME = {
-    "bg": "#0d0f13",
-    "surface": "#14171d",
-    "surface_2": "#191d25",
-    "surface_3": "#212631",
-    "border": "rgba(255,255,255,0.075)",
+THEME_BASE = {
+    "surface": "#121212",
+    "surface_2": "#181818",
+    "surface_3": "#202020",
+    "field": "#111111",
+    "border": "rgba(255,255,255,0.07)",
     "border_strong": "rgba(255,255,255,0.14)",
-    "text": "#eceff5",
-    "text_2": "#a6aebd",
-    "text_3": "#737c8e",
-    "accent": "#6e7bff",
-    "accent_2": "#8f7bff",
-    "accent_3": "#4f9dff",
+    "text": "#f5f5f5",
+    "text_2": "#999999",
+    "text_3": "#707070",
     "success": "#3fbf95",
     "warning": "#e3a94f",
     "danger": "#e5717d",
 }
 
-# Muted, coherent series palette (indigo -> blue -> violet -> teal -> rose).
-CHART_COLORS = [
-    "#7583ff", "#a08bff", "#56a5f7", "#45c2b0", "#d78fe0",
-    "#8ea2c8", "#e3a94f", "#6cc4e8", "#b6a2ff", "#7f8cf0",
-]
+THEMES = {
+    "Indigo": {
+        "bg": "#0a0b12",
+        "c1": "129,140,248", "c2": "99,102,241", "c3": "49,46,129",
+        "accent": "#818cf8", "accent_2": "#6366f1", "accent_3": "#a5b4fc",
+        "deep": "#312e81", "hot": "#4f46e5",
+        "blobs": ["#3730a3", "#7c3aed", "#06b6d4", "#ec4899", "#3b82f6"],
+    },
+    "Ember": {
+        "bg": "#080808",
+        "c1": "243,107,33", "c2": "224,68,36", "c3": "112,21,21",
+        "accent": "#f36b21", "accent_2": "#e04424", "accent_3": "#ff9a55",
+        "deep": "#701515", "hot": "#c62828",
+        "blobs": ["#7a1d1d", "#e04424", "#f36b21", "#f59e0b", "#be185d"],
+    },
+    "Ocean": {
+        "bg": "#080808",
+        "c1": "56,189,248", "c2": "37,99,235", "c3": "23,37,84",
+        "accent": "#38bdf8", "accent_2": "#2563eb", "accent_3": "#7dd3fc",
+        "deep": "#172554", "hot": "#2563eb",
+        "blobs": ["#172554", "#2563eb", "#38bdf8", "#4f46e5", "#22d3ee"],
+    },
+    "Aurora": {
+        "bg": "#080808",
+        "c1": "192,132,252", "c2": "236,72,153", "c3": "76,29,149",
+        "accent": "#c084fc", "accent_2": "#ec4899", "accent_3": "#e9b5ff",
+        "deep": "#4c1d95", "hot": "#ec4899",
+        "blobs": ["#4c1d95", "#ec4899", "#c084fc", "#22d3ee", "#6366f1"],
+    },
+    "Forest": {
+        "bg": "#080808",
+        "c1": "52,211,153", "c2": "16,185,129", "c3": "6,78,59",
+        "accent": "#34d399", "accent_2": "#10b981", "accent_3": "#86efac",
+        "deep": "#064e3b", "hot": "#10b981",
+        "blobs": ["#064e3b", "#10b981", "#34d399", "#0ea5e9", "#14b8a6"],
+    },
+}
+
+THEME = {}
+CHART_COLORS = []
+
+
+def apply_theme(name):
+
+    spec = THEMES.get(name) or THEMES[DEFAULT_THEME]
+
+    THEME.clear()
+    THEME.update(THEME_BASE)
+    THEME.update(spec)
+
+    blobs = spec["blobs"]
+
+    CHART_COLORS[:] = [
+        spec["accent"], blobs[1], blobs[4], "#45c2b0", blobs[3],
+        "#8ea2c8", "#e3a94f", spec["accent_3"], blobs[2], spec["accent_2"],
+    ]
+
+
+apply_theme(DEFAULT_THEME)
 
 FONT_STACK = (
-    '"Geist", "Inter", ui-sans-serif, system-ui, -apple-system, '
+    '"Inter", ui-sans-serif, system-ui, -apple-system, '
     '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
 )
 MONO_STACK = (
-    '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, '
+    'ui-monospace, SFMono-Regular, Menlo, Consolas, '
     '"Liberation Mono", monospace'
 )
 PLOT_FONT = (
-    "Geist, Inter, ui-sans-serif, system-ui, -apple-system, "
+    "Inter, ui-sans-serif, system-ui, -apple-system, "
     "Segoe UI, Roboto, Arial, sans-serif"
 )
 FONT_IMPORT = (
     "@import url('https://fonts.googleapis.com/css2"
-    "?family=Geist:wght@400;500;600;700"
-    "&family=Geist+Mono:wght@400;500&display=swap');"
+    "?family=Inter:wght@400;500;600;700&display=swap');"
 )
 
 ANALYSIS_OPTIONS = [
@@ -97,6 +199,14 @@ ANALYSIS_OPTIONS = [
     "Languages",
     "Releases"
 ]
+
+HEALTH_ICONS = {
+    "activity": "activity",
+    "collaboration": "users",
+    "issues": "issue",
+    "pull_requests": "pull_request",
+    "releases": "tag",
+}
 
 ANALYSIS_META = {
     "Commits": {
@@ -130,11 +240,6 @@ ANALYSIS_META = {
         "description": "Release history and latest version",
     },
 }
-
-
-# ==============================
-# 2. Icons and Formatting Helpers
-# ==============================
 
 _ICON_PATHS = {
     "github": (
@@ -261,6 +366,7 @@ def compact(markup):
     return " ".join(line.strip() for line in markup.strip().splitlines() if line.strip())
 
 
+
 def render_html(markup):
 
     st.markdown(compact(markup), unsafe_allow_html=True)
@@ -368,15 +474,10 @@ def github_url(owner, repo, path=""):
 
     return f"{base}/{path}" if path else base
 
-
-# ==============================
-# 3. Global CSS
-# ==============================
-
 def _root_variables():
-    """Design tokens exposed as CSS custom properties (single source of truth)."""
 
     t = THEME
+    blobs = "".join(f"--gs-g{i + 1}:{color};" for i, color in enumerate(t["blobs"]))
 
     return (
         ":root{"
@@ -384,6 +485,7 @@ def _root_variables():
         f"--gs-surface:{t['surface']};"
         f"--gs-surface-2:{t['surface_2']};"
         f"--gs-surface-3:{t['surface_3']};"
+        f"--gs-field:{t['field']};"
         f"--gs-border:{t['border']};"
         f"--gs-border-strong:{t['border_strong']};"
         f"--gs-text:{t['text']};"
@@ -392,11 +494,18 @@ def _root_variables():
         f"--gs-accent:{t['accent']};"
         f"--gs-accent-2:{t['accent_2']};"
         f"--gs-accent-3:{t['accent_3']};"
+        f"--gs-deep:{t['deep']};"
+        f"--gs-hot:{t['hot']};"
+        f"--gs-c1:{t['c1']};"
+        f"--gs-c2:{t['c2']};"
+        f"--gs-c3:{t['c3']};"
         f"--gs-success:{t['success']};"
         f"--gs-warning:{t['warning']};"
         f"--gs-danger:{t['danger']};"
-        "--gs-accent-soft:rgba(110,123,255,0.14);"
-        "--gs-accent-line:rgba(129,140,255,0.55);"
+        f"{blobs}"
+        "--gs-accent-soft:rgba(var(--gs-c1),0.14);"
+        "--gs-accent-line:rgba(var(--gs-c1),0.55);"
+        "--gs-card:linear-gradient(145deg,rgba(25,25,25,0.95),rgba(16,16,16,0.95));"
         f"--gs-font:{FONT_STACK};"
         f"--gs-mono:{MONO_STACK};"
         "--gs-ease:cubic-bezier(.2,.7,.2,1);"
@@ -407,7 +516,7 @@ def _root_variables():
 
 
 BASE_CSS = """
-/* ---------- App shell ---------- */
+
 html, body { background: var(--gs-bg); }
 
 .stApp {
@@ -441,7 +550,7 @@ footer { display: none !important; }
 [data-testid="stToolbar"] svg,
 [data-testid="stStatusWidget"] { color: var(--gs-text-2) !important; }
 
-/* The element that only carries this <style> block must not add a gap. */
+
 [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] style) {
     display: none;
 }
@@ -449,121 +558,248 @@ footer { display: none !important; }
 [data-testid="stMainBlockContainer"],
 .block-container {
     max-width: 1200px;
-    padding: 2.25rem 1.75rem 5rem;
+    padding: 0.75rem 1.75rem 5rem;
 }
 
 * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.16) transparent; }
-::selection { background: rgba(117,131,255,0.35); }
+::selection { background: rgba(var(--gs-c1),0.35); }
 
 .gs-i { display: block; flex: none; }
 
-/* ---------- Animated background (subtle, GPU-only transforms) ---------- */
-.stApp::before {
-    content: "";
-    position: fixed;
-    inset: -25%;
-    z-index: 0;
-    pointer-events: none;
-    background:
-        radial-gradient(38% 34% at 22% 24%, rgba(96,110,255,0.17), transparent 70%),
-        radial-gradient(34% 30% at 78% 16%, rgba(143,123,255,0.13), transparent 70%),
-        radial-gradient(40% 36% at 62% 84%, rgba(79,157,255,0.10), transparent 70%);
-    animation: gs-drift 52s ease-in-out infinite alternate;
-    will-change: transform;
-}
 
+.stApp::before,
 .stApp::after {
     content: "";
     position: fixed;
-    top: -56px; right: 0; bottom: 0; left: 0;
+    inset: 0;
     z-index: 0;
     pointer-events: none;
-    background-image:
-        linear-gradient(rgba(255,255,255,0.032) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,0.032) 1px, transparent 1px);
-    background-size: 56px 56px;
-    -webkit-mask-image: radial-gradient(ellipse 75% 60% at 50% 0%, #000 0%, transparent 78%);
-    mask-image: radial-gradient(ellipse 75% 60% at 50% 0%, #000 0%, transparent 78%);
-    animation: gs-grid 110s linear infinite;
+    background-repeat: no-repeat;
     will-change: transform;
 }
 
-@keyframes gs-drift {
-    from { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
-    to   { transform: translate3d(3%, -2%, 0) rotate(8deg) scale(1.08); }
+.stApp::before {
+    background-size: 50vmax 50vmax, 50vmax 50vmax, 50vmax 50vmax;
+    background-position: -10vmax -14vmax, calc(100vw - 34vmax) -6vmax, 24vmax 28vmax;
+    background-image:
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g1) 38%, transparent), transparent),
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g2) 26%, transparent), transparent),
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g3) 16%, transparent), transparent);
+    animation: gs-aurora-a 44s ease-in-out infinite alternate;
 }
 
-@keyframes gs-grid {
-    from { transform: translate3d(0, 0, 0); }
-    to   { transform: translate3d(0, 56px, 0); }
+.stApp::after {
+    background-size: 50vmax 50vmax, 50vmax 50vmax;
+    background-position: calc(100vw - 54vmax) calc(100vh - 24vmax), -16vmax calc(100vh - 24vmax);
+    background-image:
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g4) 18%, transparent), transparent),
+        radial-gradient(closest-side, color-mix(in srgb, var(--gs-g5) 22%, transparent), transparent);
+    animation: gs-aurora-b 70s ease-in-out infinite alternate-reverse;
 }
 
-/* ---------- Hero ---------- */
-.gs-hero {
-    position: relative;
+[data-testid="stAppViewContainer"]::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(120% 90% at 50% 0%, transparent 40%, color-mix(in srgb, var(--gs-bg) 55%, transparent));
+}
+
+@keyframes gs-aurora-a {
+    from { transform: translate3d(0, 0, 0) scale(1); }
+    to   { transform: translate3d(6vmax, 4vmax, 0) scale(1.08); }
+}
+
+@keyframes gs-aurora-b {
+    from { transform: translate3d(0, 0, 0) scale(1); }
+    to   { transform: translate3d(-5vmax, -4vmax, 0) scale(1.1); }
+}
+
+
+div.st-key-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    min-height: 64px;
+    margin-bottom: 1.1rem;
+    padding: 0 4rem 0 0;
+    border-bottom: 1px solid var(--gs-border);
+    background: color-mix(in srgb, var(--gs-bg) 88%, transparent);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+}
+
+.stApp:has([data-testid="stSidebar"][aria-expanded="false"]) div.st-key-topbar { padding-left: 2.75rem; }
+
+.gs-breadcrumb {
     display: flex;
     align-items: center;
-    gap: 18px;
-    padding: 4px 2px 26px;
-    margin-bottom: 4px;
+    gap: 7px;
+    font-size: 0.72rem;
+    white-space: nowrap;
 }
 
-.gs-hero::after {
-    content: "";
-    position: absolute;
-    left: 0; right: 0; bottom: 0;
-    height: 1px;
-    background: linear-gradient(90deg, var(--gs-accent-line), rgba(255,255,255,0.06) 45%, transparent);
-}
+.gs-breadcrumb span { color: var(--gs-text-3); }
+.gs-breadcrumb strong { color: var(--gs-text-2); font-weight: 500; }
+.gs-breadcrumb .gs-breadcrumb__sep { color: var(--gs-border-strong); }
 
-.gs-mark {
-    position: relative;
-    flex: none;
-    width: 54px; height: 54px;
-    display: grid;
-    place-items: center;
-    border-radius: 16px;
-    background: linear-gradient(140deg, #4f8cff 0%, #7a6cf6 55%, #a07af8 100%);
-    box-shadow:
-        0 12px 32px -8px rgba(110,123,255,0.6),
-        inset 0 1px 0 rgba(255,255,255,0.28);
-}
+.gs-pagehead { padding: 6px 2px 8px; }
 
 .gs-title {
     margin: 0;
-    font-size: 2.55rem;
-    line-height: 1.05;
-    font-weight: 700;
-    letter-spacing: -0.035em;
-    background: linear-gradient(180deg, #ffffff 10%, #bfc8ff 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    filter: drop-shadow(0 0 22px rgba(110,123,255,0.35));
+    font-size: 2rem;
+    line-height: 1.15;
+    font-weight: 600;
+    letter-spacing: -0.8px;
+    color: var(--gs-text);
 }
 
 .gs-subtitle {
     margin-top: 8px;
-    font-size: 1.04rem;
+    font-size: 0.95rem;
     color: var(--gs-text-2);
-    letter-spacing: -0.005em;
 }
 
 .gs-lede {
     margin-top: 6px;
-    font-size: 0.92rem;
+    font-size: 0.86rem;
     color: var(--gs-text-3);
     max-width: 68ch;
     line-height: 1.55;
 }
 
-/* ---------- Input panel ---------- */
-div.st-key-control_panel {
-    background:
-        linear-gradient(180deg, rgba(255,255,255,0.022), rgba(255,255,255,0) 40%),
-        var(--gs-surface);
+[data-testid="stSidebar"] {
+    background: rgba(10,10,10,0.96) !important;
+    border-right: 1px solid var(--gs-border);
+}
+
+[data-testid="stSidebar"][aria-expanded="true"] {
+    width: 228px !important;
+    min-width: 228px !important;
+    max-width: 228px !important;
+}
+
+[data-testid="stSidebarContent"] { background: transparent !important; }
+
+[data-testid="stSidebarHeader"] {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.5rem;
+    z-index: 2;
+    width: auto;
+    height: auto;
+    padding: 0;
+}
+
+[data-testid="stSidebarUserContent"] { padding: 0.9rem 0.75rem 1rem; }
+
+div.st-key-sb_shell { min-height: calc(100vh - 3rem); gap: 0 !important; }
+div.st-key-sb_status { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--gs-border); }
+
+.gs-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 22px; }
+
+.gs-brand__mark {
+    position: relative;
+    flex: none;
+    width: 34px; height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    color: #fff;
+    background: linear-gradient(145deg, var(--gs-deep), var(--gs-accent-2) 68%, var(--gs-accent));
+    box-shadow: 0 0 28px rgba(var(--gs-c2),0.16);
+    border: 1px solid rgba(255,255,255,0.2);
+}
+
+.gs-brand__name { font-size: 1.06rem; font-weight: 700; letter-spacing: -0.6px; white-space: nowrap; color: var(--gs-text); }
+.gs-brand__name span { color: var(--gs-accent); }
+
+.gs-nav { display: block; }
+.gs-nav__group { margin: 0 0 17px; }
+
+.gs-nav__label {
+    display: block;
+    padding: 0 12px 7px;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--gs-text-3);
+    white-space: nowrap;
+}
+
+[data-testid="stSidebar"] a.gs-nav__item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    height: 38px;
+    padding: 0 11px;
+    border-radius: 9px;
+    color: #888 !important;
+    font-size: 0.76rem;
+    text-decoration: none !important;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: background .18s var(--gs-ease), color .18s var(--gs-ease);
+}
+
+.gs-nav__item span { overflow: hidden; text-overflow: ellipsis; }
+
+[data-testid="stSidebar"] a.gs-nav__item:hover { background: #151515; color: #ddd !important; }
+
+[data-testid="stSidebar"] a.gs-nav__item:focus,
+[data-testid="stSidebar"] a.gs-nav__item:active {
+    outline: none;
+    color: #fff !important;
+    background: linear-gradient(90deg, rgba(var(--gs-c3),0.66), rgba(var(--gs-c2),0.2) 75%, rgba(var(--gs-c1),0.04));
+}
+
+[data-testid="stSidebar"] a.gs-nav__item:focus::before,
+[data-testid="stSidebar"] a.gs-nav__item:active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 10px;
+    height: 18px;
+    width: 2px;
+    border-radius: 3px;
+    background: var(--gs-accent);
+    box-shadow: 0 0 12px var(--gs-accent);
+}
+
+.gs-sbstatus {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
     border: 1px solid var(--gs-border);
-    border-radius: 20px;
+    border-radius: 10px;
+    background: var(--gs-field);
+    overflow: hidden;
+}
+
+.gs-sbstatus i {
+    flex: none;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--gs-accent);
+    box-shadow: 0 0 10px var(--gs-accent);
+}
+
+.gs-sbstatus div { display: flex; flex-direction: column; min-width: 0; }
+.gs-sbstatus strong { font-size: 0.66rem; font-weight: 600; color: var(--gs-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gs-sbstatus span { margin-top: 2px; font-size: 0.6rem; color: var(--gs-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+[data-testid="stMain"], section.main { scroll-behavior: smooth; }
+
+
+div.st-key-control_panel,
+div.st-key-compare_panel {
+    background: var(--gs-card);
+    border: 1px solid var(--gs-border);
+    border-radius: 15px;
     padding: 26px 26px 24px;
     box-shadow: var(--gs-shadow);
     gap: 1.6rem !important;
@@ -580,31 +816,36 @@ div.st-key-control_panel {
 .gs-field-label b { font-size: 0.98rem; font-weight: 600; color: var(--gs-text); }
 .gs-field-label span { font-size: 0.86rem; color: var(--gs-text-3); }
 
-/* Repository URL field */
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"] {
-    background: var(--gs-surface-2) !important;
+
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"],
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"] {
+    background: var(--gs-field) !important;
     border: 1px solid var(--gs-border-strong) !important;
-    border-radius: 13px !important;
+    border-radius: 10px !important;
     min-height: 54px;
     transition: border-color .18s var(--gs-ease), box-shadow .18s var(--gs-ease), background .18s var(--gs-ease);
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="base-input"] {
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="base-input"],
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="base-input"] {
     background: transparent !important;
-    border-radius: 13px !important;
+    border-radius: 10px !important;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:hover {
-    border-color: rgba(129,140,255,0.42) !important;
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:hover,
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"]:hover {
+    border-color: rgba(var(--gs-c1),0.42) !important;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {
+div.st-key-repo_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+div.st-key-compare_field [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {
     border-color: var(--gs-accent) !important;
     background: var(--gs-surface-3) !important;
-    box-shadow: 0 0 0 4px rgba(110,123,255,0.17), 0 0 30px -8px rgba(110,123,255,0.5) !important;
+    box-shadow: 0 0 0 4px rgba(var(--gs-c2),0.17), 0 0 30px -8px rgba(var(--gs-c2),0.5) !important;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] input {
+div.st-key-repo_field [data-testid="stTextInput"] input,
+div.st-key-compare_field [data-testid="stTextInput"] input {
     height: 54px;
     padding-left: 48px !important;
     font-size: 1rem;
@@ -618,13 +859,14 @@ div.st-key-repo_field [data-testid="stTextInput"] input {
     background-size: 22px 22px;
 }
 
-div.st-key-repo_field [data-testid="stTextInput"] input::placeholder {
+div.st-key-repo_field [data-testid="stTextInput"] input::placeholder,
+div.st-key-compare_field [data-testid="stTextInput"] input::placeholder {
     color: var(--gs-text-3) !important;
     -webkit-text-fill-color: var(--gs-text-3);
     opacity: 1;
 }
 
-/* Analysis picker: real Streamlit buttons, drawn as selectable cards */
+
 div.st-key-module_grid {
     display: grid !important;
     grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
@@ -635,16 +877,11 @@ div[class*="st-key-apick_"] { position: relative; gap: 0 !important; }
 
 div[class*="st-key-apick_"] [data-testid="stElementContainer"] { position: static; margin: 0; }
 
-/* Streamlit wraps st.markdown in an internal flex row; in this nested
-   grid/flex context that wrapper can under-report its own height versus
-   its child. Forcing block layout here makes it size to content correctly. */
+
 div[class*="st-key-apick_"] [data-testid="stMarkdown"] > div { display: block !important; }
 
 div[class*="st-key-apick_"] [data-testid="stButton"] {
-    /* Streamlit's markdown wrapper can under-report its own height in this
-       nested grid/flex context, so the click target is sized generously
-       (matching the card's min-height plus room for a wrapped description
-       line) instead of trusting inset:0 to match the visible card exactly. */
+    
     position: absolute;
     top: 0; left: 0; right: 0;
     height: 112px;
@@ -675,7 +912,7 @@ div[class*="st-key-apick_"] [data-testid="stButton"] button {
 }
 
 div[class*="st-key-apick_"]:hover .gs-pick {
-    border-color: rgba(129,140,255,0.4);
+    border-color: rgba(var(--gs-c1),0.4);
     background: var(--gs-surface-3);
     transform: translateY(-1px);
 }
@@ -687,9 +924,9 @@ div[class*="st-key-apick_"]:has(button:focus-visible) .gs-pick {
 
 .gs-pick--on,
 div[class*="st-key-apick_"]:hover .gs-pick--on {
-    border-color: rgba(129,140,255,0.7);
-    background: linear-gradient(180deg, rgba(110,123,255,0.20), rgba(110,123,255,0.07));
-    box-shadow: 0 0 0 1px rgba(129,140,255,0.25) inset, 0 14px 34px -16px rgba(110,123,255,0.65);
+    border-color: rgba(var(--gs-c1),0.7);
+    background: linear-gradient(180deg, rgba(var(--gs-c2),0.20), rgba(var(--gs-c2),0.07));
+    box-shadow: 0 0 0 1px rgba(var(--gs-c1),0.25) inset, 0 14px 34px -16px rgba(var(--gs-c2),0.65);
 }
 
 .gs-pick__icon {
@@ -705,8 +942,8 @@ div[class*="st-key-apick_"]:hover .gs-pick--on {
 
 .gs-pick--on .gs-pick__icon {
     color: #fff;
-    background: linear-gradient(140deg, #4f8cff, #8f7bff);
-    box-shadow: 0 6px 16px -6px rgba(110,123,255,0.8);
+    background: linear-gradient(145deg, var(--gs-deep), var(--gs-accent-2) 68%, var(--gs-accent));
+    box-shadow: 0 6px 16px -6px rgba(var(--gs-c2),0.8);
 }
 
 .gs-pick__title { font-size: 0.98rem; font-weight: 600; color: var(--gs-text); }
@@ -730,31 +967,39 @@ div[class*="st-key-apick_"]:hover .gs-pick--on {
     color: #fff;
 }
 
-/* Small secondary actions (Select all / Clear / Download) */
+
 div[class*="st-key-atool_"] button,
 div[class*="st-key-dl_"] button {
     min-height: 34px;
     width: auto !important;
     padding: 0 14px;
-    border-radius: 9px;
+    border-radius: 7px;
     border: 1px solid var(--gs-border) !important;
     background: transparent !important;
     color: var(--gs-text-2) !important;
-    font-size: 0.84rem;
-    font-weight: 500;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
     white-space: nowrap;
     transition: border-color .18s var(--gs-ease), color .18s var(--gs-ease), background .18s var(--gs-ease);
 }
 
 div[class*="st-key-atool_"] button:hover,
 div[class*="st-key-dl_"] button:hover {
-    border-color: rgba(129,140,255,0.5) !important;
+    border-color: rgba(var(--gs-c1),0.5) !important;
     color: var(--gs-text) !important;
     background: var(--gs-accent-soft) !important;
 }
 
 div[class*="st-key-atool_"] button p,
-div[class*="st-key-dl_"] button p { color: inherit !important; }
+div[class*="st-key-dl_"] button p {
+    color: inherit !important;
+    font-size: inherit;
+    font-weight: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+}
 
 div[class*="st-key-dl_"] { display: flex; justify-content: flex-end; }
 
@@ -763,40 +1008,46 @@ div[class*="st-key-dl_"] { display: flex; justify-content: flex-end; }
 
 .gs-period-note {
     display:flex; align-items:center; flex-wrap:wrap; gap:9px;
-    margin-top:8px; padding:10px 12px; border:1px solid rgba(129,140,255,0.18);
-    border-radius:11px; background:rgba(110,123,255,0.055); color:var(--gs-text-2);
+    margin-top:8px; padding:10px 12px; border:1px solid rgba(var(--gs-c1),0.18);
+    border-radius:11px; background:rgba(var(--gs-c2),0.055); color:var(--gs-text-2);
     font-size:0.84rem; line-height:1.4;
 }
-.gs-period-note__icon { color:#aab4ff; display:inline-flex; }
+.gs-period-note__icon { color:var(--gs-accent-3); display:inline-flex; }
 .gs-period-note b { color:var(--gs-text); font-weight:600; }
 .gs-period-note__muted { color:var(--gs-text-3); }
 
-/* Primary call to action */
-div.st-key-analyze_cta button {
-    min-height: 52px;
-    padding: 0 26px;
-    border-radius: 13px;
-    border: 1px solid rgba(255,255,255,0.16) !important;
-    background: linear-gradient(135deg, #4f7cff 0%, #7568f5 55%, #9377f6 100%) !important;
+
+div.st-key-analyze_cta button,
+div.st-key-compare_cta button {
+    min-height: 46px;
+    padding: 0 24px;
+    border-radius: 9px;
+    border: 1px solid rgba(var(--gs-c1),0.35) !important;
+    background: linear-gradient(110deg, var(--gs-deep), var(--gs-accent-2) 62%, var(--gs-accent)) !important;
     color: #fff !important;
-    font-size: 1rem;
-    font-weight: 600;
-    letter-spacing: -0.005em;
-    box-shadow: 0 12px 30px -10px rgba(110,123,255,0.75), inset 0 1px 0 rgba(255,255,255,0.24);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    box-shadow: 0 10px 26px -10px rgba(var(--gs-c2),0.6), inset 0 1px 0 rgba(255,255,255,0.2);
     transition: transform .18s var(--gs-ease), box-shadow .18s var(--gs-ease), filter .18s var(--gs-ease);
 }
 
-div.st-key-analyze_cta button:hover {
+div.st-key-analyze_cta button:hover,
+div.st-key-compare_cta button:hover {
     transform: translateY(-1px);
-    filter: brightness(1.07);
-    box-shadow: 0 18px 38px -10px rgba(110,123,255,0.85), inset 0 1px 0 rgba(255,255,255,0.28);
+    filter: brightness(1.12);
+    box-shadow: 0 14px 32px -10px rgba(var(--gs-c2),0.75), inset 0 1px 0 rgba(255,255,255,0.26);
 }
 
-div.st-key-analyze_cta button:active { transform: translateY(0); filter: brightness(0.98); }
-div.st-key-analyze_cta button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
-div.st-key-analyze_cta button p { color: #fff !important; font-weight: 600; }
+div.st-key-analyze_cta button:active,
+div.st-key-compare_cta button:active { transform: translateY(0); filter: brightness(0.98); }
+div.st-key-analyze_cta button:focus-visible,
+div.st-key-compare_cta button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+div.st-key-analyze_cta button p,
+div.st-key-compare_cta button p { color: #fff !important; font-weight: 700; font-size: inherit; letter-spacing: inherit; text-transform: inherit; }
 
-/* ---------- Results ---------- */
+
 div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
 
 @keyframes gs-enter {
@@ -812,6 +1063,7 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
 }
 
 .gs-section:first-child { margin-top: 0.9rem; }
+.gs-section { scroll-margin-top: 5rem; }
 
 .gs-section__icon {
     flex: none;
@@ -819,9 +1071,9 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     display: grid;
     place-items: center;
     border-radius: 13px;
-    color: #b4bcff;
-    background: linear-gradient(180deg, rgba(110,123,255,0.22), rgba(110,123,255,0.08));
-    border: 1px solid rgba(129,140,255,0.32);
+    color: var(--gs-accent-3);
+    background: linear-gradient(180deg, rgba(var(--gs-c2),0.22), rgba(var(--gs-c2),0.08));
+    border: 1px solid rgba(var(--gs-c1),0.32);
 }
 
 .gs-section__title {
@@ -849,7 +1101,7 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     white-space: nowrap;
 }
 
-/* KPI cards */
+
 .gs-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(208px, 1fr)); gap: 14px; }
 
 .gs-kpi {
@@ -857,13 +1109,13 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     min-width: 0;
     padding: 18px 18px 16px;
     border: 1px solid var(--gs-border);
-    border-radius: 15px;
-    background: var(--gs-surface);
+    border-radius: 14px;
+    background: var(--gs-card);
     box-shadow: var(--gs-shadow);
-    transition: border-color .2s var(--gs-ease), background .2s var(--gs-ease);
+    transition: border-color .2s var(--gs-ease);
 }
 
-.gs-kpi:hover { border-color: var(--gs-border-strong); background: var(--gs-surface-2); }
+.gs-kpi:hover { border-color: var(--gs-border-strong); }
 
 .gs-kpi__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .gs-kpi__label { font-size: 0.88rem; font-weight: 500; color: var(--gs-text-2); }
@@ -873,12 +1125,12 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
     display: grid;
     place-items: center;
     border-radius: 10px;
-    color: #a4afff;
+    color: var(--gs-accent-3);
     background: var(--gs-accent-soft);
 }
 
 .gs-kpi__icon--success { color: #6fd8b3; background: rgba(63,191,149,0.14); }
-.gs-kpi__icon--violet  { color: #b7a6ff; background: rgba(143,123,255,0.16); }
+.gs-kpi__icon--violet  { color: var(--gs-accent-3); background: rgba(var(--gs-c2),0.16); }
 .gs-kpi__icon--blue    { color: #8ec3ff; background: rgba(79,157,255,0.15); }
 .gs-kpi__icon--warning { color: #efc27e; background: rgba(227,169,79,0.14); }
 
@@ -902,11 +1154,11 @@ div.st-key-results { animation: gs-enter .55s var(--gs-ease) both; gap: 1rem; }
 
 .gs-kpi__hint { margin-top: 7px; font-size: 0.82rem; color: var(--gs-text-3); }
 
-/* Chart / table cards (Streamlit containers keyed "card_*") */
+
 div[class*="st-key-card_"] {
-    background: var(--gs-surface);
+    background: var(--gs-card);
     border: 1px solid var(--gs-border);
-    border-radius: 18px;
+    border-radius: 14px;
     padding: 20px 22px 16px;
     box-shadow: var(--gs-shadow);
     gap: 0.8rem !important;
@@ -920,7 +1172,99 @@ div[class*="st-key-card_"] {
 
 .gs-empty-chart { padding: 26px 8px; text-align: center; color: var(--gs-text-3); font-size: 0.9rem; }
 
-/* Insights */
+.gs-table-toggle {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0;
+}
+
+.gs-expand-btn {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0;
+}
+
+.gs-table-toggle button {
+    min-height: 34px !important;
+    width: 34px !important;
+    padding: 0 !important;
+    border: 1px solid rgba(255,255,255,0.09) !important;
+    border-radius: 9px !important;
+    background: rgba(255,255,255,0.035) !important;
+    color: var(--gs-text-2) !important;
+    font-size: 15px !important;
+}
+
+.gs-table-toggle button:hover {
+    border-color: rgba(var(--gs-c1),0.42) !important;
+    background: rgba(var(--gs-c1),0.10) !important;
+    color: var(--gs-text) !important;
+}
+
+div[class*="st-key-table-collapsed-"] {
+    background: var(--gs-surface);
+    border: 1px solid var(--gs-border);
+    border-radius: 12px;
+    padding: 7px 10px;
+    box-shadow: var(--gs-shadow);
+    min-width: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+div[class*="st-key-table-collapsed-"] [data-testid="stHorizontalBlock"] {
+    align-items: center;
+    gap: 8px;
+}
+
+div[class*="st-key-table-collapsed-"] [data-testid="stMarkdownContainer"] {
+    padding: 0;
+}
+
+.gs-collapsed-table-title {
+    color: var(--gs-text);
+    font-size: 0.92rem;
+    font-weight: 600;
+    line-height: 32px;
+}
+
+div[class*="st-key-table-collapsed-"] button {
+    min-height: 32px !important;
+    height: 32px !important;
+    width: 32px !important;
+    padding: 0 !important;
+    border: 1px solid rgba(255,255,255,0.09) !important;
+    border-radius: 8px !important;
+    background: rgba(255,255,255,0.035) !important;
+    color: var(--gs-text-2) !important;
+    font-size: 15px !important;
+}
+
+div[class*="st-key-table-collapsed-"] button:hover {
+    border-color: rgba(var(--gs-c1),0.42) !important;
+    background: rgba(var(--gs-c1),0.10) !important;
+    color: var(--gs-text) !important;
+}
+
+.gs-expand-btn button {
+    min-height: 34px;
+    padding: 0 12px;
+    border-radius: 9px;
+    border: 1px solid rgba(255,255,255,0.09);
+    background: rgba(255,255,255,0.035);
+    color: var(--gs-text-2);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.gs-expand-btn button:hover {
+    border-color: rgba(var(--gs-c1),0.42);
+    color: var(--gs-text);
+    background: rgba(var(--gs-c1),0.10);
+}
+
+
+
 .gs-insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; }
 .gs-insights--stack { grid-template-columns: 1fr; }
 
@@ -931,9 +1275,9 @@ div[class*="st-key-card_"] {
     gap: 14px;
     padding: 16px 18px 16px 22px;
     border-radius: 15px;
-    border: 1px solid rgba(129,140,255,0.2);
+    border: 1px solid rgba(var(--gs-c1),0.2);
     background:
-        linear-gradient(135deg, rgba(110,123,255,0.10), rgba(143,123,255,0.03) 65%),
+        linear-gradient(135deg, rgba(var(--gs-c2),0.10), rgba(var(--gs-c2),0.03) 65%),
         var(--gs-surface);
     box-shadow: var(--gs-shadow);
 }
@@ -944,28 +1288,28 @@ div[class*="st-key-card_"] {
     left: 0; top: 14px; bottom: 14px;
     width: 3px;
     border-radius: 0 3px 3px 0;
-    background: linear-gradient(180deg, #4f8cff, #8f7bff);
+    background: linear-gradient(180deg, var(--gs-accent), var(--gs-accent-2));
 }
 
-.gs-insight__icon { flex: none; margin-top: 2px; color: #a4afff; }
+.gs-insight__icon { flex: none; margin-top: 2px; color: var(--gs-accent-3); }
 .gs-insight__title { font-size: 0.86rem; font-weight: 500; color: var(--gs-text-2); }
 .gs-insight__body { margin-top: 4px; font-size: 0.97rem; line-height: 1.55; color: var(--gs-text); }
 .gs-insight__body strong { font-weight: 600; color: #fff; }
 
 .gs-insights-title { margin: 0.3rem 0 0.1rem; font-size: 1rem; font-weight: 600; color: var(--gs-text); }
 
-/* Repository identity */
+
 .gs-repo {
     position: relative;
     display: flex;
     align-items: flex-start;
     gap: 18px;
     padding: 24px 26px;
-    border-radius: 20px;
+    border-radius: 15px;
     border: 1px solid var(--gs-border);
     background:
-        radial-gradient(110% 150% at 0% 0%, rgba(110,123,255,0.16), transparent 58%),
-        var(--gs-surface);
+        radial-gradient(110% 150% at 0% 0%, rgba(var(--gs-c2),0.16), transparent 58%),
+        var(--gs-card);
     box-shadow: var(--gs-shadow);
     overflow: hidden;
 }
@@ -1005,7 +1349,7 @@ div[class*="st-key-card_"] {
 }
 
 .gs-repo__name a { color: var(--gs-text); text-decoration: none; transition: color .18s var(--gs-ease); }
-.gs-repo__name a:hover { color: #b9c1ff; }
+.gs-repo__name a:hover { color: var(--gs-accent-3); }
 .gs-repo__name .owner { color: var(--gs-text-2); font-weight: 500; }
 .gs-repo__name .sep { color: var(--gs-text-3); font-weight: 400; padding: 0 2px; }
 
@@ -1024,10 +1368,10 @@ div[class*="st-key-card_"] {
     border: 1px solid var(--gs-border);
 }
 
-.gs-chip--topic { color: #b4bcff; background: rgba(110,123,255,0.10); border-color: rgba(129,140,255,0.22); }
+.gs-chip--topic { color: var(--gs-accent-3); background: rgba(var(--gs-c2),0.10); border-color: rgba(var(--gs-c1),0.22); }
 .gs-chip--warn { color: #efc27e; background: rgba(227,169,79,0.10); border-color: rgba(227,169,79,0.25); }
 
-/* Notices (errors, warnings, success) */
+
 .gs-notice {
     display: flex;
     align-items: flex-start;
@@ -1086,7 +1430,7 @@ div[class*="st-key-card_"] {
 .gs-notice--success .gs-notice__icon { color: #6fd8b3; background: rgba(63,191,149,0.14); }
 .gs-notice--info    .gs-notice__icon { color: #8ec3ff; background: rgba(79,157,255,0.14); }
 
-/* Empty states */
+
 .gs-empty {
     display: flex;
     flex-direction: column;
@@ -1105,14 +1449,14 @@ div[class*="st-key-card_"] {
     place-items: center;
     margin-bottom: 6px;
     border-radius: 14px;
-    color: #a4afff;
+    color: var(--gs-accent-3);
     background: var(--gs-accent-soft);
 }
 
 .gs-empty__title { font-size: 1.05rem; font-weight: 600; color: var(--gs-text); }
 .gs-empty__msg { max-width: 56ch; font-size: 0.92rem; line-height: 1.55; color: var(--gs-text-2); }
 
-/* Loading */
+
 .gs-loader {
     padding: 22px 24px 24px;
     border-radius: 20px;
@@ -1127,7 +1471,7 @@ div[class*="st-key-card_"] {
     flex: none;
     width: 24px; height: 24px;
     border-radius: 50%;
-    border: 2.5px solid rgba(129,140,255,0.22);
+    border: 2.5px solid rgba(var(--gs-c1),0.22);
     border-top-color: var(--gs-accent);
     animation: gs-spin .85s linear infinite;
 }
@@ -1165,7 +1509,7 @@ div[class*="st-key-card_"] {
 @keyframes gs-slide { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
 @keyframes gs-shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 
-/* Release timeline list */
+
 .gs-tl { position: relative; display: flex; flex-direction: column; gap: 18px; padding: 4px 0 4px 4px; }
 .gs-tl::before { content: ""; position: absolute; left: 10px; top: 12px; bottom: 12px; width: 1px; background: var(--gs-border-strong); }
 .gs-tl__item { position: relative; display: flex; gap: 14px; padding-left: 4px; min-width: 0; }
@@ -1193,7 +1537,7 @@ div[class*="st-key-card_"] {
     overflow-wrap: anywhere;
 }
 
-a.gs-tl__tag:hover { color: #b9c1ff; }
+a.gs-tl__tag:hover { color: var(--gs-accent-3); }
 .gs-tl__name { margin-top: 2px; font-size: 0.86rem; color: var(--gs-text-2); overflow-wrap: anywhere; }
 .gs-tl__meta { margin-top: 2px; font-size: 0.8rem; color: var(--gs-text-3); }
 
@@ -1201,17 +1545,75 @@ a.gs-tl__tag:hover { color: #b9c1ff; }
 .gs-pill--warn { color: #efc27e; background: rgba(227,169,79,0.12); border: 1px solid rgba(227,169,79,0.25); }
 .gs-pill--muted { color: var(--gs-text-2); background: rgba(255,255,255,0.05); border: 1px solid var(--gs-border); }
 
-/* Streamlit iframe (tables) */
+.gs-method { display: flex; flex-direction: column; }
+.gs-method__row { display: flex; gap: 18px; padding: 14px 0; border-top: 1px solid var(--gs-border); }
+.gs-method__row:first-child { border-top: 0; padding-top: 2px; }
+.gs-method__name { flex: 0 0 150px; font-size: 0.92rem; font-weight: 600; color: var(--gs-text); }
+.gs-method__weight { display: block; margin-top: 2px; font-size: 0.78rem; font-weight: 400; color: var(--gs-text-3); }
+.gs-method__body { min-width: 0; flex: 1; font-size: 0.86rem; line-height: 1.5; color: var(--gs-text-2); }
+.gs-method__rule { margin-top: 4px; color: var(--gs-text-3); overflow-wrap: anywhere; }
+.gs-method__rule b { font-weight: 500; color: var(--gs-text-2); }
+.gs-method__foot { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--gs-border); font-size: 0.84rem; color: var(--gs-text-3); }
+
+.gs-cmp { display: flex; flex-direction: column; font-size: 0.9rem; }
+.gs-cmp__head, .gs-cmp__row { display: grid; grid-template-columns: minmax(150px, 1.3fr) minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: center; }
+.gs-cmp__head { padding: 4px 0 12px; border-bottom: 1px solid var(--gs-border-strong); font-weight: 600; color: var(--gs-text); overflow-wrap: anywhere; }
+.gs-cmp__group { margin-top: 18px; padding: 8px 0; font-size: 0.74rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gs-text-3); border-bottom: 1px solid var(--gs-border); }
+.gs-cmp__row { padding: 10px 0; border-bottom: 1px solid var(--gs-border); }
+.gs-cmp__row:last-child { border-bottom: 0; }
+.gs-cmp__metric { color: var(--gs-text-2); }
+.gs-cmp__val { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--gs-text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.gs-cmp__val--na { color: var(--gs-text-3); }
+.gs-cmp__val--lead { font-weight: 600; }
+.gs-cmp__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--gs-success); }
+
+
+.gs-period-note--warn { border-color: rgba(227,169,79,0.35); background: rgba(227,169,79,0.08); }
+
+.gs-stages { display: flex; flex-direction: column; gap: 8px; margin: 0 0 18px; }
+
+.gs-stage {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--gs-border);
+    border-radius: 11px;
+    background: var(--gs-surface-2);
+    font-size: 0.88rem;
+}
+
+.gs-stage__dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--gs-text-3); }
+.gs-stage--running .gs-stage__dot { background: var(--gs-accent); box-shadow: 0 0 0 4px rgba(var(--gs-c2),0.22); }
+.gs-stage--done .gs-stage__dot { background: var(--gs-success); }
+.gs-stage--failed .gs-stage__dot { background: var(--gs-danger); }
+.gs-stage__name { flex: 1; min-width: 0; font-weight: 500; color: var(--gs-text); }
+.gs-stage--pending .gs-stage__name { color: var(--gs-text-3); }
+.gs-stage__meta { color: var(--gs-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gs-stage--running .gs-stage__meta { color: var(--gs-text-2); }
+
+.gs-status { font-size: 0.9rem; color: var(--gs-text-2); line-height: 1.5; }
+.gs-status b { color: var(--gs-text); font-weight: 600; }
+
+.gs-rate { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--gs-border); border-radius: 12px; background: var(--gs-surface-2); }
+.gs-rate--warn { border-color: rgba(227,169,79,0.4); background: rgba(227,169,79,0.07); }
+.gs-rate__row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.gs-rate__name { flex: 0 0 70px; font-size: 0.84rem; font-weight: 600; color: var(--gs-text); }
+.gs-rate__text { font-size: 0.84rem; color: var(--gs-text-2); font-variant-numeric: tabular-nums; }
+.gs-rate__count { font-size: 0.84rem; font-weight: 600; color: var(--gs-text); font-variant-numeric: tabular-nums; }
+.gs-rate__foot { font-size: 0.8rem; color: var(--gs-text-3); line-height: 1.45; }
+.gs-meter { flex: 1 1 140px; min-width: 100px; height: 6px; overflow: hidden; border-radius: 6px; background: rgba(255,255,255,0.08); }
+.gs-meter__fill { height: 100%; border-radius: 6px; }
+
+.gs-table-count { font-size: 0.84rem; color: var(--gs-text-3); line-height: 34px; }
+
+div[class*="st-key-tsearch_"] input { min-height: 34px; font-size: 0.88rem; }
+
+
 .stApp iframe { border: 0; border-radius: 12px; color-scheme: dark; }
 
-/* ---------- Selectbox dropdown popover ---------- */
-/* Newer Streamlit renders the open option list via react-aria in a
-   fixed-position portal (data-testid="stSelectboxVirtualDropdown")
-   appended to <body>, outside .stApp. It doesn't pick up the dark
-   theme.base the way the closed control does, so it's themed
-   explicitly here. CSS in a <style> tag applies document-wide
-   regardless of where that tag sits in the DOM, so this still reaches
-   the portal even though it's outside .stApp. */
+
+
 div[data-testid="stSelectboxVirtualDropdown"] {
     background: var(--gs-surface-3) !important;
     border: 1px solid var(--gs-border-strong) !important;
@@ -1234,26 +1636,70 @@ div[data-testid="stSelectboxVirtualDropdown"] [role="option"] * {
     color: inherit !important;
 }
 
-/* ---------- Responsive ---------- */
+
+div.st-key-theme_picker { width: auto; }
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] {
+    width: auto;
+    gap: 3px;
+    padding: 3px;
+    background: var(--gs-field);
+    border: 1px solid var(--gs-border);
+    border-radius: 9px;
+}
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button {
+    min-height: 26px;
+    padding: 0 10px;
+    border: 0 !important;
+    border-radius: 6px;
+    background: transparent !important;
+    color: var(--gs-text-3) !important;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+}
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button p {
+    color: inherit !important;
+    font-size: inherit;
+    font-weight: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+}
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button:hover { color: var(--gs-text) !important; }
+
+div.st-key-theme_picker [data-testid="stButtonGroup"] button[aria-checked="true"],
+div.st-key-theme_picker [data-testid="stButtonGroup"] button[data-testid$="Active"] {
+    background: rgba(var(--gs-c1),0.18) !important;
+    color: var(--gs-accent-3) !important;
+    box-shadow: inset 0 0 0 1px rgba(var(--gs-c1),0.3);
+}
+
+
 @media (max-width: 900px) {
-    [data-testid="stMainBlockContainer"], .block-container { padding: 1.5rem 1rem 4rem; }
-    .gs-title { font-size: 2.05rem; }
-    .gs-mark { width: 46px; height: 46px; border-radius: 14px; }
-    div.st-key-control_panel { padding: 18px 16px; border-radius: 16px; }
+    [data-testid="stMainBlockContainer"], .block-container { padding: 0.5rem 1rem 4rem; }
+    .gs-title { font-size: 1.7rem; }
+    div.st-key-control_panel, div.st-key-compare_panel { padding: 18px 16px; border-radius: 16px; }
     div[class*="st-key-card_"] { padding: 16px 14px 12px; border-radius: 16px; }
     .gs-repo { flex-direction: column; padding: 20px 18px; }
+    .gs-cmp__head, .gs-cmp__row { grid-template-columns: minmax(104px, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
     .gs-section { flex-wrap: wrap; margin-top: 1.8rem; }
     .gs-section__note { margin-left: 0; }
     .gs-kpi__value { font-size: 1.7rem; }
 }
 
 @media (max-width: 520px) {
-    .gs-hero { align-items: flex-start; }
+    .gs-method__row { flex-direction: column; gap: 6px; }
+    .gs-method__name { flex: none; }
     .gs-lede { display: none; }
     div.st-key-module_grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
+    [data-testid="stMain"], section.main { scroll-behavior: auto !important; }
     .stApp::before, .stApp::after, div.st-key-results,
     .gs-spinner, .gs-loader__bar::after, .gs-skel { animation: none !important; }
     .gs-pick, .gs-kpi, div.st-key-analyze_cta button { transition: none !important; }
@@ -1269,35 +1715,144 @@ def inject_styles():
         unsafe_allow_html=True
     )
 
+def render_theme_picker():
 
-# ==============================
-# 4. Reusable UI Components
-# ==============================
+    with st.container(key="theme_picker"):
+
+        st.segmented_control(
+            "Theme",
+            options=list(THEMES),
+            key="theme",
+            label_visibility="collapsed",
+        )
+
 
 def hero():
 
+    crumbs = (
+        '<span>RepoMetric</span><span class="gs-breadcrumb__sep">/</span>'
+        '<strong>Analyzer</strong>'
+    )
+
+    if st.session_state.get("analysis") is not None and st.session_state.get("analyzed_owner"):
+
+        full_name = f"{st.session_state.analyzed_owner}/{st.session_state.analyzed_repo}"
+        crumbs += f'<span class="gs-breadcrumb__sep">/</span><strong>{esc(full_name)}</strong>'
+
+    with st.container(
+        key="topbar",
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
+    ):
+        render_html(f'<div class="gs-breadcrumb">{crumbs}</div>')
+        render_theme_picker()
+
     render_html(f"""
-    <div class="gs-hero">
-        <div class="gs-mark">{icon('search', 26, 2.1)}</div>
-        <div>
-            <h1 class="gs-title">RepoMetric</h1>
-            <div class="gs-subtitle">GitHub Repository Activity &amp; Collaboration Analyzer</div>
-            <div class="gs-lede">
-                Point it at any public repository to pull commit activity, contributor
-                concentration, issue and pull request health, language mix and release
-                history straight from the GitHub API.
-            </div>
+    <div class="gs-pagehead">
+        <h1 class="gs-title">RepoMetric</h1>
+        <div class="gs-subtitle">GitHub Repository Activity &amp; Collaboration Analyzer</div>
+        <div class="gs-lede">
+            Point it at any public repository to pull commit activity, contributor
+            concentration, issue and pull request health, language mix and release
+            history straight from the GitHub API.
         </div>
     </div>
     """)
 
 
+def render_sidebar():
+
+    groups = []
+    placed = set()
+
+    for label, titles in NAV_GROUPS:
+
+        items = [(t, *NAV_SECTIONS[t]) for t in titles if t in NAV_SECTIONS]
+        placed.update(t for t, *_ in items)
+
+        if items:
+            groups.append((label, items))
+
+    leftover = [(t, *v) for t, v in NAV_SECTIONS.items() if t not in placed]
+
+    if leftover:
+        groups.append(("More", leftover))
+
+    nav_html = "".join(
+        '<div class="gs-nav__group">'
+        f'<span class="gs-nav__label">{esc(label)}</span>'
+        + "".join(
+            f'<a class="gs-nav__item" href="#{slug}" target="_self">'
+            f'{icon(icon_name, 16, 1.9)}<span>{esc(title)}</span></a>'
+            for title, slug, icon_name in items
+        )
+        + "</div>"
+        for label, items in groups
+    )
+
+    analysis = st.session_state.get("analysis")
+
+    if analysis is not None and st.session_state.get("analyzed_owner"):
+        status_title = f"{st.session_state.analyzed_owner}/{st.session_state.analyzed_repo}"
+        status_text = f"Fetched {fmt_date(analysis.get('fetched_at'), with_time=True)} UTC"
+    else:
+        status_title = "No data loaded"
+        status_text = "Waiting for a repository"
+
+    with st.sidebar:
+
+        with st.container(key="sb_shell"):
+
+            render_html(f"""
+            <div class="gs-brand">
+                <div class="gs-brand__mark">{icon('search', 18, 2.2)}</div>
+                <div class="gs-brand__name">Repo<span>Metric</span></div>
+            </div>
+            """)
+
+            if nav_html:
+                render_html(f'<nav class="gs-nav">{nav_html}</nav>')
+
+            with st.container(key="sb_status"):
+
+                render_html(f"""
+                <div class="gs-sbstatus">
+                    <i></i>
+                    <div>
+                        <strong>{esc(status_title)}</strong>
+                        <span>{esc(status_text)}</span>
+                    </div>
+                </div>
+                """)
+
+
+NAV_SECTIONS = {}
+
+NAV_GROUPS = [
+    ("Overview", ["Repository Overview", "Repository Snapshot", "Repository Health Score"]),
+    ("Activity", ["Commit Analysis", "Developer Activity Heatmap", "Commit Velocity", "Contributor Analysis"]),
+    ("Issues and Pull Requests", ["Issue Analysis", "Issue Resolution", "Pull Request Analysis", "Pull Request Health"]),
+    ("Code and Releases", ["Programming Language Analysis", "Release Analysis", "Release Cadence"]),
+    ("Insights", ["Trend Detection", "Repository Timeline", "Anomaly Detection"]),
+    ("Compare and Data", ["Repository Comparison", "API Usage and Exports"]),
+]
+
+
+def section_slug(title):
+
+    return "sec-" + re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-")
+
+
 def section_header(title, description, icon_name, note=None):
+
+    slug = section_slug(title)
+    NAV_SECTIONS.setdefault(title, (slug, icon_name))
 
     note_html = f'<div class="gs-section__note">{icon("info", 14)}{esc(note)}</div>' if note else ""
 
     render_html(f"""
-    <div class="gs-section">
+    <div class="gs-section" id="{slug}">
         <div class="gs-section__icon">{icon(icon_name, 22, 1.8)}</div>
         <div style="min-width:0;">
             <div class="gs-section__title">{esc(title)}</div>
@@ -1423,7 +1978,82 @@ def card_open(key, title=None, subtitle=None):
         yield
 
 
-def loading_panel(owner, repo, selected, period=None):
+def fmt_elapsed(seconds):
+
+    if seconds is None:
+        return ""
+
+    return f"{seconds:.1f}s" if seconds < 100 else f"{seconds / 60:.1f} min"
+
+
+def fmt_age(seconds):
+
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "N/A"
+
+    if value < 60:
+        return f"{value:.0f} s"
+
+    return f"{value / 60:.0f} min"
+
+
+def stage_rows_html(snapshot):
+
+    if not snapshot or not snapshot["stages"]:
+        return ""
+
+    rows = []
+
+    for stage in snapshot["stages"]:
+
+        status = stage["status"]
+
+        if status == "pending":
+            meta = "Waiting"
+        elif status == "failed":
+            meta = "Failed" if not stage["records"] else f"Failed after {fmt_int(stage['records'])} records"
+        else:
+
+            parts = []
+
+            if stage["records"]:
+                parts.append(f"{fmt_int(stage['records'])} records")
+
+            if stage["pages"] > 1:
+                parts.append(f"{fmt_int(stage['pages'])} pages")
+
+            if status == "running" and not parts:
+                parts.append("Fetching")
+
+            if stage["elapsed"] is not None:
+                parts.append(fmt_elapsed(stage["elapsed"]))
+
+            meta = " · ".join(parts)
+
+        rows.append(
+            f'<div class="gs-stage gs-stage--{status}">'
+            f'<span class="gs-stage__dot"></span>'
+            f'<span class="gs-stage__name">{esc(stage["label"])}</span>'
+            f'<span class="gs-stage__meta">{esc(meta)}</span>'
+            f'</div>'
+        )
+
+    return f'<div class="gs-stages">{"".join(rows)}</div>'
+
+
+def loading_panel(owner, repo, selected, period=None, snapshot=None):
+
+    stages_html = stage_rows_html(snapshot)
+
+    progress_line = ""
+
+    if snapshot and snapshot["total"]:
+        progress_line = (
+            f' &middot; {snapshot["done"]} of {snapshot["total"]} steps done'
+            f' &middot; {fmt_int(snapshot["requests"])} request(s)'
+        )
 
     chips = "".join(
         f'<span class="gs-chip">{icon(ANALYSIS_META[name]["icon"], 13)}{esc(name)}</span>'
@@ -1438,10 +2068,11 @@ def loading_panel(owner, repo, selected, period=None):
             <div class="gs-spinner"></div>
             <div style="min-width:0;">
                 <div class="gs-loader__title">Fetching data from the GitHub API</div>
-                <div class="gs-loader__sub">{esc(owner)}/{esc(repo)} &middot; {len(selected)} module{'s' if len(selected) != 1 else ''} selected &middot; {esc(period or "All Time")}</div>
+                <div class="gs-loader__sub">{esc(owner)}/{esc(repo)} &middot; {len(selected)} module{'s' if len(selected) != 1 else ''} selected &middot; {esc(period or "All Time")}{progress_line}</div>
             </div>
         </div>
         <div class="gs-loader__bar"></div>
+        {stages_html}
         <div class="gs-loader__chips">{chips}</div>
         <div class="gs-skel-grid">{skel_kpis}</div>
     </div>
@@ -1460,9 +2091,254 @@ def styled_dataframe(df, column_config=None, height=None, column_order=None):
     )
 
 
-# ==============================
-# 5. Chart Helpers (one consistent Plotly theme)
-# ==============================
+@st.dialog("Expanded View", width="large")
+def expanded_view(title, fig=None, df=None, column_config=None, height=520, column_order=None):
+
+    st.markdown(f"### {esc(title)}")
+
+    if fig is not None:
+        fig.update_layout(autosize=True, height=height)
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            height=height,
+            config={**PLOTLY_CONFIG, "responsive": True},
+            key="expanded_view_plot",
+        )
+
+    if df is not None:
+        st.dataframe(
+            df,
+            width="stretch",
+            height=height,
+            hide_index=True,
+            column_config=column_config or {},
+            column_order=column_order,
+        )
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def export_file_stem(title):
+
+    slug = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-") or "table"
+    repo = re.sub(r"[^a-z0-9._-]+", "-", str(st.session_state.get("analyzed_repo") or "repometric").lower()).strip("-")
+
+    return f"{repo}-{slug}"
+
+
+def render_table_tools(key, title, df, filter_columns=None, date_column=None):
+
+    filter_columns = filter_columns or {}
+    searchable = len(df) >= TABLE_SEARCH_MIN_ROWS
+
+    date_bounds = None
+
+    if searchable and date_column and date_column in df.columns:
+
+        stamps = pd.to_datetime(df[date_column], utc=True, errors="coerce").dropna()
+
+        if not stamps.empty:
+            date_bounds = (stamps.min().date(), stamps.max().date())
+
+    widths = (
+        [2.4] + [1.3] * len(filter_columns) + ([2.0] if date_bounds else [])
+        if searchable
+        else [3.7]
+    )
+    cols = st.columns(widths + [0.8, 1.4], gap="small", vertical_alignment="bottom")
+
+    query = ""
+    chosen = {}
+    date_range = None
+
+    if searchable:
+
+        with cols[0]:
+            query = st.text_input(
+                "Search this table",
+                key=f"tsearch_{key}",
+                placeholder="Search this table",
+                label_visibility="collapsed",
+            )
+
+        for index, (column, label) in enumerate(filter_columns.items(), start=1):
+
+            options = (
+                sorted(
+                    df[column]
+                    .dropna()
+                    .astype(str)
+                    .value_counts()
+                    .head(TABLE_FILTER_MAX_OPTIONS)
+                    .index
+                )
+                if column in df.columns
+                else []
+            )
+
+            with cols[index]:
+                chosen[column] = st.multiselect(
+                    label,
+                    options,
+                    key=f"tfilter_{key}_{column}",
+                    placeholder=label,
+                    label_visibility="collapsed",
+                )
+
+        if date_bounds:
+
+            low, high = date_bounds
+
+            with cols[1 + len(filter_columns)]:
+                picked = st.date_input(
+                    "Date range",
+                    value=(low, high),
+                    min_value=low,
+                    max_value=high,
+                    key=f"tdate_{key}_{low}_{high}",
+                    format="YYYY-MM-DD",
+                    label_visibility="collapsed",
+                )
+
+            if isinstance(picked, (tuple, list)) and len(picked) == 2 and tuple(picked) != (low, high):
+                date_range = (picked[0], picked[1])
+
+    filtered = (
+        filter_table(df, query, chosen, date_column=date_column, date_range=date_range)
+        if searchable
+        else df
+    )
+    stem = export_file_stem(title)
+
+    with cols[-2]:
+        st.download_button(
+            "CSV",
+            data=dataframe_to_csv_bytes(filtered),
+            file_name=f"{stem}.csv",
+            mime="text/csv",
+            key=f"dl_{key}_csv",
+            on_click="ignore",
+        )
+
+    signature = (
+        st.session_state.get("analysis_stamp"),
+        len(filtered),
+        query,
+        tuple(sorted((column, tuple(values)) for column, values in chosen.items())),
+        date_range,
+    )
+    ready = st.session_state.xlsx_ready.get(key)
+
+    with cols[-1]:
+
+        if ready is not None and ready["signature"] == signature:
+            st.download_button(
+                "Download Excel",
+                data=ready["data"],
+                file_name=f"{stem}.xlsx",
+                mime=XLSX_MIME,
+                key=f"dl_{key}_xlsx",
+                on_click="ignore",
+            )
+
+        elif st.button("Prepare Excel", key=f"dl_{key}_xlsx_prep"):
+
+            with st.spinner("Building the Excel file"):
+                data, _ = tables_to_excel_bytes([(title, filtered)])
+
+            st.session_state.xlsx_ready[key] = {"signature": signature, "data": data}
+            st.rerun()
+
+    count_text = (
+        f"Showing {fmt_int(len(filtered))} of {fmt_int(len(df))} rows"
+        if searchable
+        else f"{fmt_int(len(df))} rows"
+    )
+
+    if searchable:
+        render_html(f'<div class="gs-table-count">{esc(count_text)}</div>')
+    else:
+        with cols[0]:
+            render_html(f'<div class="gs-table-count">{esc(count_text)}</div>')
+
+    return filtered
+
+
+def visual_card(key, title, subtitle, fig=None, df=None, column_config=None, height=360, column_order=None, default_view="Chart", filter_columns=None, date_column=None):
+
+    if fig is not None:
+        with card_open(f"{key}_chart", title, subtitle):
+            chart_action_cols = st.columns([1, 0.12], gap="small")
+            with chart_action_cols[1]:
+                st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
+                if st.button("Expand", key=f"{key}_chart_expand", width="stretch"):
+                    expanded_view(
+                        title,
+                        fig=fig,
+                        height=max(height, 520),
+                    )
+                st.markdown('</div>', unsafe_allow_html=True)
+            render_chart(fig, key=f"{key}_plot")
+
+    if df is not None:
+        table_state_key = f"table_visible_{key}"
+        if table_state_key not in st.session_state:
+            st.session_state[table_state_key] = False
+
+        table_visible = st.session_state[table_state_key]
+
+        if not table_visible:
+            with st.container(key=f"table-collapsed-{key}"):
+                collapsed_cols = st.columns([1, 0.05], gap="small", vertical_alignment="center")
+                with collapsed_cols[0]:
+                    st.markdown(
+                        f'<div class="gs-collapsed-table-title">{esc(title)} table</div>',
+                        unsafe_allow_html=True,
+                    )
+                with collapsed_cols[1]:
+                    if st.button("⌄", key=f"{key}_table_toggle", width="stretch"):
+                        st.session_state[table_state_key] = True
+                        st.rerun()
+        else:
+            with card_open(f"{key}_table", f"{title} table", "Detailed data for this analysis."):
+                table_action_cols = st.columns([1, 0.08, 0.08], gap="small")
+
+                view_df = render_table_tools(key, title, df, filter_columns, date_column)
+
+                with table_action_cols[1]:
+                    st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
+                    if st.button("Expand", key=f"{key}_table_expand", width="stretch"):
+                        expanded_view(
+                            f"{title} table",
+                            df=view_df,
+                            column_config=column_config,
+                            height=max(height, 520),
+                            column_order=column_order,
+                        )
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                with table_action_cols[2]:
+                    st.markdown('<div class="gs-table-toggle">', unsafe_allow_html=True)
+                    if st.button(
+                        "⌃",
+                        key=f"{key}_table_toggle",
+                        width="stretch",
+                    ):
+                        st.session_state[table_state_key] = False
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                if view_df.empty and not df.empty:
+                    render_html('<div class="gs-empty-chart">No rows match the current search and filters.</div>')
+                else:
+                    styled_dataframe(
+                        view_df,
+                        column_config=column_config,
+                        height=height,
+                        column_order=column_order,
+                    )
 
 def _style_figure(fig, height=340, legend=True):
     """Apply the shared dark theme to any Plotly figure in place."""
@@ -1517,9 +2393,15 @@ PLOTLY_CONFIG = {
 }
 
 
-def render_chart(fig):
+def render_chart(fig, key=None):
 
-    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+    fig.update_layout(autosize=True)
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config={**PLOTLY_CONFIG, "responsive": True},
+        key=key,
+    )
 
 
 def commit_trend_figure(commits_df):
@@ -1686,10 +2568,246 @@ def releases_timeline_figure(releases_df):
 
     return _style_figure(fig, height=170, legend=False)
 
+def health_color(score):
 
-# ==============================
-# 6. Section Renderers
-# ==============================
+    if score >= 75:
+        return THEME["success"]
+
+    if score >= 50:
+        return THEME["warning"]
+
+    return THEME["danger"]
+
+
+def health_tone(score):
+
+    if score is None:
+        return ""
+
+    if score >= 75:
+        return "success"
+
+    if score >= 50:
+        return "blue"
+
+    return "warning"
+
+
+def health_components_figure(components):
+
+    scored = [item for item in components if item["available"]][::-1]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=[item["score"] for item in scored],
+        y=[item["name"] for item in scored],
+        orientation="h",
+        marker=dict(
+            color=[health_color(item["score"]) for item in scored],
+            line=dict(width=0),
+        ),
+        text=[f"{item['score']:.0f}" for item in scored],
+        textposition="outside",
+        cliponaxis=False,
+        textfont=dict(color=THEME["text"], size=13),
+        hovertemplate="<b>%{y}</b><br>Score %{x:.0f} / 100<extra></extra>",
+    ))
+
+    fig.update_yaxes(title_text=None)
+    fig.update_xaxes(
+        title_text="Score (0-100)",
+        range=[0, 112],
+        tickvals=[0, 25, 50, 75, 100],
+    )
+
+    height = max(240, 54 * len(scored) + 70)
+
+    return _style_figure(fig, height=height, legend=False)
+
+
+def health_breakdown_table(components):
+
+    rows = []
+
+    for item in components:
+
+        applied = (
+            f"{item['effective_weight']:.0f}%"
+            if item["available"] and item["effective_weight"] is not None
+            else "0%"
+        )
+        base = f"{item['weight']}%"
+        component_score = item["score"] if item["available"] else None
+
+        if not item["inputs"]:
+
+            rows.append({
+                "component": item["name"],
+                "component_score": component_score,
+                "metric": "Window result" if item["available"] else "Not scored",
+                "value": item["reason"] or "Not available",
+                "metric_score": component_score,
+                "rule": "",
+                "base_weight": base,
+                "applied_weight": applied,
+            })
+
+            continue
+
+        for entry in item["inputs"]:
+
+            rows.append({
+                "component": item["name"],
+                "component_score": component_score,
+                "metric": entry["label"],
+                "value": entry["value"],
+                "metric_score": entry["score"],
+                "rule": entry["rule"],
+                "base_weight": base,
+                "applied_weight": applied,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def render_health_methodology(components):
+
+    rows = []
+
+    for item in components:
+
+        rules = "".join(
+            f'<div class="gs-method__rule"><b>{esc(label)}:</b> {esc(rule)}</div>'
+            for label, rule in item["rules"]
+        )
+
+        status = ""
+
+        if not item["available"]:
+            status = (
+                f'<div class="gs-method__rule">'
+                f'<span class="gs-pill gs-pill--warn">Not scored</span> {esc(item["reason"])}'
+                f'</div>'
+            )
+
+        rows.append(f"""
+        <div class="gs-method__row">
+            <div class="gs-method__name">{esc(item['name'])}
+                <span class="gs-method__weight">Base weight {item['weight']}%</span>
+            </div>
+            <div class="gs-method__body">{esc(item['summary'])}{rules}{status}</div>
+        </div>
+        """)
+
+    with card_open(
+        "health_method",
+        "How the score is calculated",
+        "Each component is scored 0-100 from the rules below. The overall score is the weighted average of the components that could be scored.",
+    ):
+        render_html(f"""
+        <div class="gs-method">
+            {''.join(rows)}
+            <div class="gs-method__foot">
+                Overall bands: Healthy is 75 or above, Moderate is 50 to 74, Needs attention is below 50.
+                Components without data are left out and the remaining weights are rescaled to 100%.
+                All inputs come from the selected analysis window.
+            </div>
+        </div>
+        """)
+
+
+def render_health_score(analysis):
+
+    health = analysis.get("health_score")
+
+    if not health:
+        return
+
+    section_header(
+        "Repository Health Score",
+        "A 0-100 score built from activity, collaboration, issue, pull request and release signals, with every input shown.",
+        "activity",
+    )
+
+    components = health["components"]
+
+    if health["overall"] is None:
+
+        empty_state(
+            "Health score unavailable",
+            "Select at least one of Commits, Contributors, Issues, Pull Requests or Releases so there is data to score.",
+            "activity",
+        )
+
+        return
+
+    def component_card(item):
+
+        if item["available"]:
+            value = f"{item['score']:.0f}"
+            hint = f"Applied weight {item['effective_weight']:.0f}%"
+        else:
+            value = "N/A"
+            hint = "Not scored"
+
+        return {
+            "label": item["name"],
+            "value": value,
+            "icon": HEALTH_ICONS[item["key"]],
+            "tone": health_tone(item["score"]) if item["available"] else "",
+            "hint": hint,
+        }
+
+    overall_card = {
+        "label": "Overall Health",
+        "value": f"{health['overall']} / 100",
+        "icon": "trending",
+        "tone": health_tone(health["overall"]),
+        "hint": f"{health['label']} · {health['available_count']} of {health['total_count']} components scored",
+    }
+
+    cards = [component_card(item) for item in components]
+
+    kpi_grid([overall_card] + cards[:2])
+    kpi_grid(cards[2:])
+
+    unscored = [item for item in components if not item["available"]]
+
+    if unscored:
+
+        details = " ".join(f"{item['name']}: {item['reason']}" for item in unscored)
+
+        notice(
+            "info",
+            "Some components were not scored",
+            f"The overall score uses {health['available_count']} of {health['total_count']} components, "
+            f"with the remaining weights rescaled to 100%. {details}",
+        )
+
+    scored = [item for item in components if item["available"]]
+
+    visual_card(
+        "health_components",
+        "Component scores",
+        "Score of each component behind the overall health score, and the full breakdown table.",
+        fig=health_components_figure(components) if scored else None,
+        df=health_breakdown_table(components),
+        column_config={
+            "component": st.column_config.TextColumn("Component"),
+            "component_score": st.column_config.NumberColumn("Component score", format="%.0f"),
+            "metric": st.column_config.TextColumn("Metric"),
+            "value": st.column_config.TextColumn("Value", width="medium"),
+            "metric_score": st.column_config.NumberColumn("Metric score", format="%.0f"),
+            "rule": st.column_config.TextColumn("How it is scored", width="large"),
+            "base_weight": st.column_config.TextColumn("Base weight"),
+            "applied_weight": st.column_config.TextColumn("Applied weight"),
+        },
+        height=360,
+    )
+
+    render_health_methodology(components)
+
 
 def render_repository_overview(repository, owner, repo):
 
@@ -1780,17 +2898,46 @@ def render_commits_section(analysis):
     ])
 
     if commits_df.empty:
-
         empty_state("No commit data", "GitHub returned no commits for this repository.", "commit")
         return
 
-    with card_open("commits_trend", "Commits over time", "Daily commit counts across the fetched history."):
-        render_chart(commit_trend_figure(commits_df))
+    table = commits_df[["date", "author", "message", "sha"]].copy()
+    table["sha"] = table["sha"].astype(str).str.slice(0, 7)
+    table = table.sort_values("date", ascending=False)
+
+    commit_fig = commit_trend_figure(commits_df)
+    commit_config = {
+        "date": st.column_config.DatetimeColumn("Date", format="D MMM YYYY, HH:mm"),
+        "author": st.column_config.TextColumn("Author"),
+        "message": st.column_config.TextColumn("Message", width="large"),
+        "sha": st.column_config.TextColumn("SHA"),
+    }
+
+    visual_card(
+        "commits_activity",
+        "Commits over time",
+        "Commit activity over time and the detailed commit log.",
+        fig=commit_fig,
+        df=table,
+        column_config=commit_config,
+        height=360,
+        date_column="date",
+    )
 
     if not monthly_trend.empty:
-
+        monthly_fig = commit_monthly_figure(monthly_trend)
         with card_open("commits_monthly", "Monthly commit activity", "Commits, active days and contributors per month."):
-            render_chart(commit_monthly_figure(monthly_trend))
+            monthly_action_cols = st.columns([1, 0.12], gap="small")
+            with monthly_action_cols[1]:
+                st.markdown('<div class="gs-expand-btn">', unsafe_allow_html=True)
+                if st.button("Expand", key="commits_monthly_expand", width="stretch"):
+                    expanded_view(
+                        "Monthly commit activity",
+                        fig=monthly_fig,
+                        height=560,
+                    )
+                st.markdown('</div>', unsafe_allow_html=True)
+            render_chart(monthly_fig, key="commits_monthly_plot")
 
     insight_items = [
         {
@@ -1808,7 +2955,6 @@ def render_commits_section(analysis):
     ]
 
     if monthly_metrics:
-
         insight_items.append({
             "icon": "calendar",
             "title": "Busiest month",
@@ -1819,19 +2965,6 @@ def render_commits_section(analysis):
         })
 
     insight_cards(insight_items)
-
-    with card_open("commits_table", "Commit log", f"{fmt_int(len(commits_df))} commit(s) fetched, most recent first."):
-
-        table = commits_df[["date", "author", "message", "sha"]].copy()
-        table["sha"] = table["sha"].astype(str).str.slice(0, 7)
-        table = table.sort_values("date", ascending=False)
-
-        styled_dataframe(table, column_config={
-            "date": st.column_config.DatetimeColumn("Date", format="D MMM YYYY, HH:mm"),
-            "author": st.column_config.TextColumn("Author"),
-            "message": st.column_config.TextColumn("Message", width="large"),
-            "sha": st.column_config.TextColumn("SHA"),
-        }, height=360)
 
 
 def render_contributors_section(analysis):
@@ -1851,41 +2984,104 @@ def render_contributors_section(analysis):
         {"label": "Top Contributor", "value": metrics["top_contributor"], "icon": "user", "tone": "violet", "wrap_text": True},
         {"label": "Top Contributor Share", "value": format_percentage(concentration["top_contributor_concentration"]), "icon": "percent", "tone": "blue"},
         {"label": "Top 3 Share", "value": format_percentage(concentration["top_3_contributor_concentration"]), "icon": "trending", "tone": "success"},
+        {
+            "label": "Top 5 Share",
+            "value": format_percentage(concentration["top_5_contributor_concentration"]),
+            "icon": "users",
+            "tone": "violet",
+            "hint": f"All {fmt_int(metrics['total_contributors'])} contributors" if metrics["total_contributors"] <= 5 else None,
+        },
     ])
 
     if contributors_df.empty:
-
         empty_state("No contributor data", "GitHub returned no contributors for this repository.", "users")
         return
 
-    with card_open("contributors_chart", "Top contributors", "Contributions by user, most active first."):
-        render_chart(contributors_figure(contributors_df))
+    leaderboard = analysis.get("contributor_leaderboard")
+
+    if leaderboard is None or leaderboard.empty:
+        leaderboard = contributors_df
+
+    leaderboard_order = [
+        column
+        for column in (
+            "rank",
+            "username",
+            "contributions",
+            "contribution_percentage",
+            "active_days",
+            "first_contribution",
+            "last_contribution",
+            "activity_trend",
+        )
+        if column in leaderboard.columns
+    ]
+
+    contributor_config = {
+        "rank": st.column_config.NumberColumn("#", format="%d"),
+        "active_days": st.column_config.NumberColumn("Active days", format="%d"),
+        "first_contribution": st.column_config.DatetimeColumn("First contribution", format="D MMM YYYY"),
+        "last_contribution": st.column_config.DatetimeColumn("Last contribution", format="D MMM YYYY"),
+        "activity_trend": st.column_config.TextColumn("Activity trend"),
+        "username": st.column_config.TextColumn("Username"),
+        "contributions": st.column_config.NumberColumn("Contributions", format="%d"),
+        "contribution_percentage": st.column_config.ProgressColumn(
+            "Share",
+            format="%.2f%%",
+            min_value=0,
+            max_value=max(float(contributors_df["contribution_percentage"].max()), 1.0),
+        ),
+    }
+
+    visual_card(
+        "contributors_activity",
+        "Top contributors",
+        "Contribution distribution and the detailed contributor table.",
+        fig=contributors_figure(contributors_df),
+        df=leaderboard,
+        column_config=contributor_config,
+        height=360,
+        column_order=leaderboard_order,
+    )
+
+    render_methodology(
+        "leaderboard_method",
+        "How the contributor leaderboard is built",
+        "Each column in the table follows these rules.",
+        LEADERBOARD_METHODS,
+        LEADERBOARD_FOOT,
+    )
+
+    total_contributors = metrics["total_contributors"]
+
+    if total_contributors > 5:
+        top_5_body = (
+            f"The top 5 contributors account for "
+            f"<strong>{format_percentage(concentration['top_5_contributor_concentration'])}</strong> "
+            f"of measured contribution activity."
+        )
+    else:
+        top_5_body = (
+            f"Only <strong>{fmt_int(total_contributors)}</strong> contributor(s) were measured, "
+            f"so the top 5 covers <strong>{format_percentage(concentration['top_5_contributor_concentration'])}</strong> "
+            f"of measured contribution activity."
+        )
 
     insight_cards([
         {
             "icon": "user",
-            "title": "Contribution concentration",
+            "title": "Contributor concentration",
             "body_html": f"<strong>{esc(metrics['top_contributor'])}</strong> accounts for "
-                         f"<strong>{format_percentage(concentration['top_contributor_concentration'])}</strong> of analyzed contributions.",
+                         f"<strong>{format_percentage(concentration['top_contributor_concentration'])}</strong> of measured contribution activity, "
+                         f"and the top 3 contributors together account for "
+                         f"<strong>{format_percentage(concentration['top_3_contributor_concentration'])}</strong>.",
         },
         {
             "icon": "users",
-            "title": "Top 3 combined",
-            "body_html": f"The top 3 contributors together make up "
-                         f"<strong>{format_percentage(concentration['top_3_contributor_concentration'])}</strong> of all contributions.",
+            "title": "Top 5 combined",
+            "body_html": top_5_body,
         },
     ])
-
-    with card_open("contributors_table", "All contributors", f"{fmt_int(len(contributors_df))} contributor(s), ranked by contributions."):
-
-        styled_dataframe(contributors_df, column_config={
-            "username": st.column_config.TextColumn("Username"),
-            "contributions": st.column_config.NumberColumn("Contributions", format="%d"),
-            "contribution_percentage": st.column_config.ProgressColumn(
-                "Share", format="%.2f%%", min_value=0,
-                max_value=max(float(contributors_df["contribution_percentage"].max()), 1.0),
-            ),
-        }, height=360)
 
 
 def render_issues_section(analysis):
@@ -1907,47 +3103,46 @@ def render_issues_section(analysis):
     ])
 
     if issues_df.empty:
-
         empty_state("No issue data", "GitHub returned no issues for this repository.", "issue")
         return
 
-    left, right = st.columns([1, 1.35], gap="medium")
-
     state_counts = issues_df["state"].value_counts().to_dict()
+    table = issues_df.sort_values("created_at", ascending=False)
+    issue_config = {
+        "number": st.column_config.NumberColumn("#", format="%d"),
+        "title": st.column_config.TextColumn("Title", width="large"),
+        "state": st.column_config.TextColumn("State"),
+        "author": st.column_config.TextColumn("Author"),
+        "created_at": st.column_config.DatetimeColumn("Opened", format="D MMM YYYY"),
+        "closed_at": st.column_config.DatetimeColumn("Closed", format="D MMM YYYY"),
+        "comments": st.column_config.NumberColumn("Comments", format="%d"),
+    }
 
-    with left:
-        with card_open("issues_donut", "Status split", "Open versus closed issues in the fetched sample."):
-            render_chart(status_donut_figure(state_counts, {"open": THEME["warning"], "closed": THEME["success"]}))
+    visual_card(
+        "issues_activity",
+        "Issue activity",
+        "Issue status distribution and the detailed issue table.",
+        fig=status_donut_figure(state_counts, {"open": THEME["warning"], "closed": THEME["success"]}),
+        df=table,
+        column_config=issue_config,
+        height=360,
+        filter_columns={"state": "State", "author": "Author"},
+        date_column="created_at",
+    )
 
-    with right:
-
-        insight_cards([
-            {
-                "icon": "percent",
-                "title": "Closure rate",
-                "body_html": f"<strong>{format_percentage(metrics['closure_rate'])}</strong> of fetched issues have been closed.",
-            },
-            {
-                "icon": "alert",
-                "title": "Currently open",
-                "body_html": f"<strong>{fmt_int(metrics['open_issues'])}</strong> issue(s) remain open out of "
-                             f"<strong>{fmt_int(metrics['total_issues'])}</strong> fetched.",
-            },
-        ], stack=True)
-
-    with card_open("issues_table", "Issue list", f"{fmt_int(len(issues_df))} issue(s), most recent first."):
-
-        table = issues_df.sort_values("created_at", ascending=False)
-
-        styled_dataframe(table, column_config={
-            "number": st.column_config.NumberColumn("#", format="%d"),
-            "title": st.column_config.TextColumn("Title", width="large"),
-            "state": st.column_config.TextColumn("State"),
-            "author": st.column_config.TextColumn("Author"),
-            "created_at": st.column_config.DatetimeColumn("Opened", format="D MMM YYYY"),
-            "closed_at": st.column_config.DatetimeColumn("Closed", format="D MMM YYYY"),
-            "comments": st.column_config.NumberColumn("Comments", format="%d"),
-        }, height=360)
+    insight_cards([
+        {
+            "icon": "percent",
+            "title": "Closure rate",
+            "body_html": f"<strong>{format_percentage(metrics['closure_rate'])}</strong> of fetched issues have been closed.",
+        },
+        {
+            "icon": "alert",
+            "title": "Currently open",
+            "body_html": f"<strong>{fmt_int(metrics['open_issues'])}</strong> issue(s) remain open out of "
+                         f"<strong>{fmt_int(metrics['total_issues'])}</strong> fetched.",
+        },
+    ], stack=True)
 
 
 def render_pull_requests_section(analysis):
@@ -1969,47 +3164,54 @@ def render_pull_requests_section(analysis):
     ])
 
     if pr_df.empty:
-
         empty_state("No pull request data", "GitHub returned no pull requests for this repository.", "pull_request")
         return
 
-    left, right = st.columns([1, 1.35], gap="medium")
-
     state_counts = pr_df["state"].value_counts().to_dict()
+    table = pr_df.sort_values("created_at", ascending=False).copy()
+    merge_status = pd.Series("Open", index=table.index)
+    merge_status[table["state"].eq("closed")] = "Closed without merge"
 
-    with left:
-        with card_open("pr_donut", "Status split", "Open versus closed pull requests (closed includes merged)."):
-            render_chart(status_donut_figure(state_counts, {"open": THEME["warning"], "closed": THEME["accent"]}))
+    if "merged_at" in table.columns:
+        merge_status[table["merged_at"].notna()] = "Merged"
 
-    with right:
+    table["merge_status"] = merge_status
+    pr_config = {
+        "merge_status": st.column_config.TextColumn("Merge status"),
+        "number": st.column_config.NumberColumn("#", format="%d"),
+        "title": st.column_config.TextColumn("Title", width="large"),
+        "state": st.column_config.TextColumn("State"),
+        "author": st.column_config.TextColumn("Author"),
+        "created_at": st.column_config.DatetimeColumn("Opened", format="D MMM YYYY"),
+        "merged_at": st.column_config.DatetimeColumn("Merged", format="D MMM YYYY"),
+        "closed_at": st.column_config.DatetimeColumn("Closed", format="D MMM YYYY"),
+        "comments": st.column_config.NumberColumn("Comments", format="%d"),
+    }
 
-        insight_cards([
-            {
-                "icon": "merge",
-                "title": "Merge rate",
-                "body_html": f"<strong>{format_percentage(metrics['merge_rate'])}</strong> of fetched pull requests have been merged.",
-            },
-            {
-                "icon": "alert",
-                "title": "Currently open",
-                "body_html": f"<strong>{fmt_int(metrics['open_pull_requests'])}</strong> pull request(s) are still open.",
-            },
-        ], stack=True)
+    visual_card(
+        "pr_activity",
+        "Pull request activity",
+        "Pull request status distribution and the detailed pull request table.",
+        fig=status_donut_figure(state_counts, {"open": THEME["warning"], "closed": THEME["accent"]}),
+        df=table,
+        column_config=pr_config,
+        height=360,
+        filter_columns={"state": "State", "merge_status": "Merge status", "author": "Author"},
+        date_column="created_at",
+    )
 
-    with card_open("pr_table", "Pull request list", f"{fmt_int(len(pr_df))} pull request(s), most recent first."):
-
-        table = pr_df.sort_values("created_at", ascending=False)
-
-        styled_dataframe(table, column_config={
-            "number": st.column_config.NumberColumn("#", format="%d"),
-            "title": st.column_config.TextColumn("Title", width="large"),
-            "state": st.column_config.TextColumn("State"),
-            "author": st.column_config.TextColumn("Author"),
-            "created_at": st.column_config.DatetimeColumn("Opened", format="D MMM YYYY"),
-            "merged_at": st.column_config.DatetimeColumn("Merged", format="D MMM YYYY"),
-            "closed_at": st.column_config.DatetimeColumn("Closed", format="D MMM YYYY"),
-            "comments": st.column_config.NumberColumn("Comments", format="%d"),
-        }, height=360)
+    insight_cards([
+        {
+            "icon": "merge",
+            "title": "Merge rate",
+            "body_html": f"<strong>{format_percentage(metrics['merge_rate'])}</strong> of fetched pull requests have been merged.",
+        },
+        {
+            "icon": "alert",
+            "title": "Currently open",
+            "body_html": f"<strong>{fmt_int(metrics['open_pull_requests'])}</strong> pull request(s) are still open.",
+        },
+    ], stack=True)
 
 
 def render_languages_section(analysis):
@@ -2023,7 +3225,6 @@ def render_languages_section(analysis):
     languages_df = analysis["languages"]
 
     if languages_df.empty:
-
         empty_state("No language data", "GitHub returned no language breakdown for this repository.", "code")
         return
 
@@ -2038,35 +3239,35 @@ def render_languages_section(analysis):
         {"label": "Total Code Size", "value": fmt_bytes(total_bytes), "icon": "package", "tone": "success"},
     ])
 
-    left, right = st.columns([1, 1.35], gap="medium")
+    language_config = {
+        "language": st.column_config.TextColumn("Language"),
+        "bytes": st.column_config.NumberColumn("Bytes", format="%d"),
+        "percentage": st.column_config.ProgressColumn("Share", format="%.2f%%", min_value=0, max_value=100),
+    }
 
-    with left:
-        with card_open("lang_pie", "Distribution", "Share of code by language, measured in bytes."):
-            render_chart(languages_figure(languages_df))
+    visual_card(
+        "languages_activity",
+        "Language distribution",
+        "Language distribution and the detailed language table.",
+        fig=languages_figure(languages_df),
+        df=languages_df,
+        column_config=language_config,
+        height=360,
+    )
 
-    with right:
-
-        insight_cards([
-            {
-                "icon": "star",
-                "title": "Dominant language",
-                "body_html": f"<strong>{esc(top_row['language'])}</strong> makes up "
-                             f"<strong>{format_percentage(top_row['percentage'])}</strong> of the codebase by size.",
-            },
-            {
-                "icon": "code",
-                "title": "Language diversity",
-                "body_html": f"<strong>{polyglot_count}</strong> language(s) each account for at least 1% of the codebase.",
-            },
-        ], stack=True)
-
-    with card_open("lang_table", "Language breakdown", None):
-
-        styled_dataframe(languages_df, column_config={
-            "language": st.column_config.TextColumn("Language"),
-            "bytes": st.column_config.NumberColumn("Bytes", format="%d"),
-            "percentage": st.column_config.ProgressColumn("Share", format="%.2f%%", min_value=0, max_value=100),
-        })
+    insight_cards([
+        {
+            "icon": "star",
+            "title": "Dominant language",
+            "body_html": f"<strong>{esc(top_row['language'])}</strong> makes up "
+                         f"<strong>{format_percentage(top_row['percentage'])}</strong> of the codebase by size.",
+        },
+        {
+            "icon": "code",
+            "title": "Language diversity",
+            "body_html": f"<strong>{polyglot_count}</strong> language(s) each account for at least 1% of the codebase.",
+        },
+    ], stack=True)
 
 
 def render_releases_section(analysis, owner, repo):
@@ -2092,23 +3293,32 @@ def render_releases_section(analysis, owner, repo):
     ])
 
     if releases_df.empty:
-
         empty_state("No release data", "This repository has no published releases.", "tag")
         return
 
     ordered = releases_df.sort_values("published_at", ascending=False, na_position="last")
+    release_fig = releases_timeline_figure(releases_df)
+    release_config = {
+        "tag": st.column_config.TextColumn("Tag"),
+        "name": st.column_config.TextColumn("Name", width="medium"),
+        "author": st.column_config.TextColumn("Author"),
+        "published_at": st.column_config.DatetimeColumn("Published", format="D MMM YYYY"),
+        "draft": st.column_config.CheckboxColumn("Draft"),
+        "prerelease": st.column_config.CheckboxColumn("Pre-release"),
+    }
 
-    with card_open("releases_timeline", "Release timeline", "Published releases over time; amber marks a pre-release."):
-
-        fig = releases_timeline_figure(releases_df)
-
-        if fig is not None:
-            render_chart(fig)
-        else:
-            render_html('<div class="gs-empty-chart">No published releases with dates to plot.</div>')
+    visual_card(
+        "releases_activity",
+        "Release timeline",
+        "Release timeline and the complete release table.",
+        fig=release_fig,
+        df=ordered,
+        column_config=release_config,
+        column_order=["tag", "name", "author", "published_at", "draft", "prerelease"],
+        height=360,
+    )
 
     if has_cadence:
-
         insight_cards([
             {
                 "icon": "clock",
@@ -2151,28 +3361,853 @@ def render_releases_section(analysis, owner, repo):
     with card_open("releases_list", "Recent releases", None):
         render_html(f'<div class="gs-tl">{"".join(items)}</div>')
 
-    if len(releases_df) > 12:
 
-        with card_open("releases_table", "All releases", f"{fmt_int(len(releases_df))} release(s) fetched."):
+def fmt_days(value):
 
-            styled_dataframe(
-                ordered,
-                column_config={
-                    "tag": st.column_config.TextColumn("Tag"),
-                    "name": st.column_config.TextColumn("Name", width="medium"),
-                    "author": st.column_config.TextColumn("Author"),
-                    "published_at": st.column_config.DatetimeColumn("Published", format="D MMM YYYY"),
-                    "draft": st.column_config.CheckboxColumn("Draft"),
-                    "prerelease": st.column_config.CheckboxColumn("Pre-release"),
-                },
-                column_order=["tag", "name", "author", "published_at", "draft", "prerelease"],
-                height=340,
-            )
+    if is_missing(value):
+        return "N/A"
+
+    days = float(value)
+
+    if days < 1:
+        return f"{days * 24:.1f} hrs"
+
+    if days >= 730:
+        return f"{days / 365.25:.1f} years"
+
+    if days >= 100:
+        return f"{days:,.0f} days"
+
+    return f"{days:,.1f} days"
 
 
-# ==============================
-# 7. Input Panel, Analysis Flow, Page Assembly
-# ==============================
+def fmt_rate(value):
+
+    if is_missing(value):
+        return "N/A"
+
+    number = float(value)
+
+    return f"{number:,.2f}" if number < 10 else f"{number:,.1f}"
+
+
+def fmt_span(start, end):
+
+    return f"{fmt_date(start)} – {fmt_date(end)}"
+
+
+def shorten(text, limit=46):
+
+    text = str(text or "").strip()
+
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def render_methodology(key, title, subtitle, methods, foot):
+
+    rows = []
+
+    for item in methods:
+
+        rules = "".join(
+            f'<div class="gs-method__rule"><b>{esc(label)}:</b> {esc(rule)}</div>'
+            for label, rule in item["rules"]
+        )
+
+        rows.append(f"""
+        <div class="gs-method__row">
+            <div class="gs-method__name">{esc(item['name'])}</div>
+            <div class="gs-method__body">{esc(item['summary'])}{rules}</div>
+        </div>
+        """)
+
+    with card_open(key, title, subtitle):
+        render_html(f"""
+        <div class="gs-method">
+            {''.join(rows)}
+            <div class="gs-method__foot">{esc(foot)}</div>
+        </div>
+        """)
+
+
+def velocity_weekly_figure(weekly_df):
+
+    ordered = weekly_df.sort_values("week_start")
+
+    colors = [
+        CHART_COLORS[0] if done else "rgba(117,131,255,0.38)"
+        for done in ordered["complete"]
+    ]
+
+    details = pd.DataFrame({
+        "end": ordered["week_end"].dt.strftime("%d %b %Y"),
+        "status": [
+            "Complete week" if done else "Partial week, not used for the peak"
+            for done in ordered["complete"]
+        ],
+    })
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=ordered["week_start"], y=ordered["commits"],
+        name="Commits",
+        marker=dict(color=colors, line=dict(width=0)),
+        customdata=details.to_numpy(),
+        hovertemplate=(
+            "<b>Week of %{x|%d %b %Y}</b><br>"
+            "%{y} commit(s)<br>"
+            "Ends %{customdata[0]}<br>"
+            "%{customdata[1]}"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.update_yaxes(rangemode="tozero", title_text="Commits")
+    fig.update_xaxes(title_text=None)
+
+    return _style_figure(fig, legend=False)
+
+
+def grouped_monthly_figure(monthly_df, series):
+
+    fig = go.Figure()
+
+    for column, name, color in series:
+
+        fig.add_trace(go.Bar(
+            x=monthly_df["month"], y=monthly_df[column],
+            name=name,
+            marker=dict(color=color, line=dict(width=0)),
+            hovertemplate=f"<b>%{{x}}</b><br>%{{y}} {name.lower()}<extra></extra>",
+        ))
+
+    fig.update_layout(barmode="group")
+    fig.update_yaxes(rangemode="tozero", title_text="Count")
+    fig.update_xaxes(title_text=None, type="category")
+
+    return _style_figure(fig, legend=True)
+
+
+def age_band_figure(aging_df):
+
+    colors = [CHART_COLORS[2]] * (len(aging_df) - 1) + [THEME["warning"]]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=aging_df["age_band"], y=aging_df["count"],
+        name="Open",
+        marker=dict(color=colors, line=dict(width=0)),
+        customdata=aging_df[["share"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "%{y} open<br>"
+            "%{customdata[0]:.1f}% of open"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.update_yaxes(rangemode="tozero", title_text="Open items")
+    fig.update_xaxes(title_text=None, type="category")
+
+    return _style_figure(fig, legend=False)
+
+
+def release_interval_figure(intervals_df, median_days):
+
+    ordered = intervals_df.sort_values("published_at")
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=ordered["published_at"], y=ordered["days_since_previous"],
+        name="Days since previous release",
+        marker=dict(color=CHART_COLORS[2], line=dict(width=0)),
+        customdata=ordered[["tag"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "%{x|%d %b %Y}<br>"
+            "%{y:.1f} days after the previous release"
+            "<extra></extra>"
+        ),
+    ))
+
+    if median_days is not None and len(ordered) > 1:
+
+        fig.add_trace(go.Scatter(
+            x=[ordered["published_at"].min(), ordered["published_at"].max()],
+            y=[median_days, median_days],
+            mode="lines",
+            name=f"Median {median_days:.1f} days",
+            line=dict(color=THEME["warning"], width=1.8, dash="dash"),
+            hovertemplate=f"Median {median_days:.1f} days<extra></extra>",
+        ))
+
+    fig.update_yaxes(rangemode="tozero", title_text="Days")
+    fig.update_xaxes(title_text=None)
+
+    return _style_figure(fig, legend=True)
+
+
+def commit_heatmap_figure(matrix):
+
+    days = [column for column in matrix.columns if column != "block"]
+    values = matrix[days].values.tolist()
+    labels = [["" if value == 0 else str(int(value)) for value in row] for row in values]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=values,
+            x=days,
+            y=matrix["block"].tolist(),
+            text=labels,
+            texttemplate="%{text}",
+            textfont=dict(size=12.5, color=THEME["text"]),
+            colorscale=[[0.0, "rgba(117,131,255,0.07)"], [1.0, "#7583ff"]],
+            zmin=0,
+            xgap=3,
+            ygap=3,
+            showscale=False,
+            hovertemplate="%{x}, %{y} UTC<br>%{z} commit(s)<extra></extra>",
+        )
+    )
+
+    _style_figure(fig, height=340, legend=False)
+
+    fig.update_layout(hovermode="closest")
+    fig.update_xaxes(showgrid=False, fixedrange=True)
+    fig.update_yaxes(showgrid=False, autorange="reversed", fixedrange=True, title_text="Time block (UTC)")
+
+    return fig
+
+
+def render_commit_heatmap(analysis):
+
+    insights = analysis.get("commit_heatmap") or {}
+    matrix = analysis.get("commit_heatmap_matrix")
+
+    if not insights or matrix is None or matrix.empty:
+        return
+
+    section_header(
+        "Developer Activity Heatmap",
+        "When commits are recorded, by day of the week and time of day in UTC.",
+        "calendar",
+    )
+
+    total = insights["total_commits"]
+
+    if not insights["sufficient"]:
+        notice(
+            "info",
+            "Small sample",
+            f"Only {fmt_int(total)} commit(s) are in this window, so the pattern below may be down to chance.",
+        )
+
+    ratio = insights["weekend_ratio"]
+
+    if ratio is None:
+        weekend_hint = "No weekday commits to compare with"
+    else:
+        weekend_hint = f"{ratio:.2f}x the weekday rate per day"
+
+    kpi_grid([
+        {
+            "label": "Most Active Day",
+            "value": insights["most_active_day"],
+            "icon": "calendar",
+            "tone": "violet",
+            "hint": f"{fmt_int(insights['most_active_day_commits'])} commits, {insights['most_active_day_share']:.1f}% of all",
+        },
+        {
+            "label": "Most Active Time (UTC)",
+            "value": insights["most_active_block"],
+            "icon": "clock",
+            "tone": "blue",
+            "hint": f"{fmt_int(insights['most_active_block_commits'])} commits, {insights['most_active_block_share']:.1f}% of all",
+        },
+        {
+            "label": "Peak Activity Period",
+            "value": f"{insights['peak_day']}, {insights['peak_block']}",
+            "icon": "activity",
+            "wrap_text": True,
+            "hint": f"{fmt_int(insights['peak_commits'])} commits, {insights['peak_share']:.1f}% of all",
+        },
+        {
+            "label": "Weekend Share",
+            "value": f"{insights['weekend_share']:.1f}%",
+            "icon": "percent",
+            "tone": "success",
+            "hint": weekend_hint,
+        },
+    ])
+
+    day_columns = [column for column in matrix.columns if column != "block"]
+    heatmap_config = {
+        "block": st.column_config.TextColumn("Time block (UTC)"),
+        **{
+            column: st.column_config.NumberColumn(column, format="%d")
+            for column in day_columns
+        },
+    }
+
+    visual_card(
+        "commit_heatmap",
+        "Commits by weekday and time",
+        "Darker cells mean more commits. Each row is a 4-hour block of the day in UTC.",
+        fig=commit_heatmap_figure(matrix),
+        df=matrix,
+        column_config=heatmap_config,
+        height=260,
+    )
+
+    if ratio is None:
+        split_body = (
+            f"All <strong>{fmt_int(insights['weekend_commits'])}</strong> commit(s) landed on weekends."
+        )
+    else:
+        split_body = (
+            f"<strong>{insights['weekday_share']:.1f}%</strong> of commits landed Monday to Friday "
+            f"(<strong>{insights['weekday_per_day']:.1f}</strong> per day) and "
+            f"<strong>{insights['weekend_share']:.1f}%</strong> on weekends "
+            f"(<strong>{insights['weekend_per_day']:.1f}</strong> per day)."
+        )
+
+    insight_cards([
+        {
+            "icon": "trending",
+            "title": "Peak activity period",
+            "body_html": f"The busiest slot is <strong>{esc(insights['peak_day'])}</strong> between "
+                         f"<strong>{esc(insights['peak_block'])} UTC</strong>, with "
+                         f"<strong>{fmt_int(insights['peak_commits'])} commit(s)</strong>. "
+                         f"Overall, <strong>{esc(insights['most_active_day'])}</strong> is the busiest day and "
+                         f"<strong>{esc(insights['most_active_block'])} UTC</strong> the busiest time block.",
+        },
+        {
+            "icon": "calendar",
+            "title": "Weekday versus weekend",
+            "body_html": split_body,
+        },
+    ])
+
+    render_methodology(
+        "heatmap_method",
+        "How the activity heatmap is calculated",
+        "Each figure above follows these rules.",
+        HEATMAP_METHODS,
+        HEATMAP_FOOT,
+    )
+
+
+def render_commit_velocity(analysis):
+
+    velocity = analysis.get("commit_velocity") or {}
+
+    if not velocity:
+        return
+
+    section_header(
+        "Commit Velocity",
+        "How many commits land per day, week and month, and how that compares with the previous period.",
+        "trending",
+    )
+
+    comparison = velocity["comparison"]
+    window_days = velocity["window_days"]
+
+    if window_days is None:
+        window_hint = "No commits found"
+        week_hint = month_hint = window_hint
+    else:
+        window_hint = f"Over {window_days:,.0f} days"
+        week_hint = window_hint if velocity["per_week"] is not None else "Needs a window of at least 7 days"
+        month_hint = window_hint if velocity["per_month"] is not None else "Needs a window of at least 30 days"
+
+    if comparison["change_pct"] is not None:
+        change_value = f"{comparison['change_pct']:+.1f}%"
+    elif comparison["change_abs"] is not None:
+        change_value = (
+            "No change"
+            if comparison["change_abs"] == 0
+            else f"{comparison['change_abs']:+,d} commit{'' if abs(comparison['change_abs']) == 1 else 's'}"
+        )
+    else:
+        change_value = "N/A"
+
+    if comparison["prior_commits"] is not None:
+        change_hint = f"{fmt_int(comparison['current_commits'])} vs {fmt_int(comparison['prior_commits'])} commits"
+    else:
+        change_hint = "Not comparable"
+
+    peak_week = velocity["peak_week"]
+    peak_month = velocity["peak_month"]
+
+    kpi_grid([
+        {"label": "Commits / Day", "value": fmt_rate(velocity["per_day"]), "icon": "activity", "tone": "blue", "hint": window_hint},
+        {"label": "Commits / Week", "value": fmt_rate(velocity["per_week"]), "icon": "calendar", "tone": "violet", "hint": week_hint},
+        {"label": "Commits / Month", "value": fmt_rate(velocity["per_month"]), "icon": "calendar", "tone": "success", "hint": month_hint},
+        {"label": "Change vs Previous Period", "value": change_value, "icon": "trending", "tone": "blue", "hint": change_hint},
+    ])
+
+    kpi_grid([
+        {
+            "label": "Peak Week",
+            "value": fmt_span(peak_week["start"], peak_week["end"]) if peak_week else "N/A",
+            "icon": "commit",
+            "tone": "warning",
+            "wrap_text": True,
+            "hint": f"{fmt_int(peak_week['commits'])} commit(s)" if peak_week else "No complete week with commits",
+        },
+        {
+            "label": "Peak Month",
+            "value": pd.Timestamp(peak_month["start"]).strftime("%B %Y") if peak_month else "N/A",
+            "icon": "commit",
+            "tone": "warning",
+            "wrap_text": True,
+            "hint": f"{fmt_int(peak_month['commits'])} commit(s)" if peak_month else "No complete month with commits",
+        },
+    ])
+
+    if comparison["prior_start"]:
+        render_html(
+            f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+            f'<span class="gs-period-note__icon">{icon("calendar", 15, 1.9)}</span>'
+            f'<span><b>Previous period:</b> {esc(fmt_span(comparison["prior_start"], comparison["prior_end"]))}</span>'
+            f'</div>'
+        )
+
+    if comparison["status"] != "comparable" and comparison["reason"]:
+        notice(
+            "info",
+            "No percentage change shown" if comparison["status"] == "limited" else "Change vs previous period unavailable",
+            comparison["reason"],
+        )
+
+    weekly = analysis["commit_velocity_weekly"]
+
+    if velocity["commits"] == 0 or weekly.empty:
+
+        empty_state("No commits to chart", "There were no commits in the selected window, so there is no weekly activity to show.", "commit")
+
+    else:
+
+        table = weekly.sort_values("week_start", ascending=False)
+
+        visual_card(
+            "velocity_weekly",
+            "Weekly commits",
+            f"Commits per Monday-to-Sunday week. Lighter bars are partial weeks and are never chosen as the peak ({velocity['complete_weeks']} of {velocity['total_weeks']} weeks are complete).",
+            fig=velocity_weekly_figure(weekly),
+            df=table,
+            column_config={
+                "week_start": st.column_config.DatetimeColumn("Week starts (Mon)", format="D MMM YYYY"),
+                "week_end": st.column_config.DatetimeColumn("Week ends (Sun)", format="D MMM YYYY"),
+                "commits": st.column_config.NumberColumn("Commits", format="%d"),
+                "complete": st.column_config.CheckboxColumn("Complete week"),
+            },
+            height=360,
+        )
+
+    render_methodology(
+        "velocity_method",
+        "How commit velocity is calculated",
+        "Each figure above follows these rules.",
+        VELOCITY_METHODS,
+        VELOCITY_FOOT,
+    )
+
+
+def render_issue_resolution(analysis):
+
+    metrics = analysis.get("issue_resolution") or {}
+
+    if not metrics or analysis["issues"].empty:
+        return
+
+    section_header(
+        "Issue Resolution",
+        "How long issues take to close, how long open ones have waited, and how issue volume moves month to month.",
+        "issue",
+    )
+
+    closed_hint = (
+        f"Across {fmt_int(metrics['closed_with_duration'])} closed issue(s)"
+        if metrics["closed_with_duration"]
+        else "No closed issues in this window"
+    )
+
+    oldest = metrics["oldest_open"]
+
+    if oldest:
+        oldest_value = fmt_days(oldest["age_days"])
+        oldest_hint = f"#{oldest['number']} · {shorten(oldest['title'])}"
+    else:
+        oldest_value = "None open"
+        oldest_hint = "Every issue in this window is closed"
+
+    if metrics["open_count"]:
+        stale_hint = f"{format_percentage(metrics['stale_open_share'])} of {fmt_int(metrics['open_count'])} open issue(s)"
+    else:
+        stale_hint = "No open issues"
+
+    kpi_grid([
+        {"label": "Median Time to Close", "value": fmt_days(metrics["median_days_to_close"]), "icon": "clock", "tone": "blue", "hint": closed_hint},
+        {"label": "Average Time to Close", "value": fmt_days(metrics["average_days_to_close"]), "icon": "clock", "tone": "violet", "hint": closed_hint},
+        {"label": "Oldest Open Issue", "value": oldest_value, "icon": "alert", "tone": "warning", "hint": oldest_hint},
+        {"label": f"Open Over {STALE_ISSUE_DAYS} Days", "value": fmt_int(metrics["stale_open_count"]), "icon": "alert", "tone": "warning", "hint": stale_hint},
+    ])
+
+    monthly = analysis["issue_monthly"]
+
+    if not monthly.empty:
+
+        visual_card(
+            "issues_monthly",
+            "Issues opened and closed per month",
+            "Issues created each month and issues from this window closed each month.",
+            fig=grouped_monthly_figure(
+                monthly,
+                [("opened", "Opened", CHART_COLORS[0]), ("closed", "Closed", THEME["success"])],
+            ),
+            df=monthly,
+            column_config={
+                "month": st.column_config.TextColumn("Month"),
+                "opened": st.column_config.NumberColumn("Opened", format="%d"),
+                "closed": st.column_config.NumberColumn("Closed", format="%d"),
+            },
+            height=320,
+        )
+
+    aging = analysis["issue_aging"]
+
+    if metrics["open_count"] and not aging.empty:
+
+        visual_card(
+            "issues_aging",
+            "Open issue aging",
+            f"How long currently open issues have been waiting. The last band is stale (over {STALE_ISSUE_DAYS} days).",
+            fig=age_band_figure(aging),
+            df=aging,
+            column_config={
+                "age_band": st.column_config.TextColumn("Age"),
+                "count": st.column_config.NumberColumn("Open issues", format="%d"),
+                "share": st.column_config.NumberColumn("Share of open", format="%.1f%%"),
+            },
+            height=280,
+        )
+
+    render_methodology(
+        "issue_resolution_method",
+        "How issue resolution is calculated",
+        "Each figure above follows these rules.",
+        ISSUE_RESOLUTION_METHODS,
+        ISSUE_RESOLUTION_FOOT,
+    )
+
+
+def render_pull_request_health(analysis):
+
+    metrics = analysis.get("pull_request_health") or {}
+
+    if not metrics or analysis["pull_requests"].empty:
+        return
+
+    section_header(
+        "Pull Request Health",
+        "How long pull requests take to merge, how many are closed without merging, and how long open ones have waited.",
+        "pull_request",
+    )
+
+    merged_hint = (
+        f"Across {fmt_int(metrics['merged_with_duration'])} merged PR(s)"
+        if metrics["merged_with_duration"]
+        else "No merged PRs in this window"
+    )
+
+    if metrics["closed_count"]:
+        unmerged_hint = f"{format_percentage(metrics['closed_unmerged_share'])} of {fmt_int(metrics['closed_count'])} closed PR(s)"
+    else:
+        unmerged_hint = "No closed PRs in this window"
+
+    oldest = metrics["oldest_open"]
+
+    if metrics["open_count"]:
+        stale_hint = f"{format_percentage(metrics['stale_open_share'])} of {fmt_int(metrics['open_count'])} open PR(s)"
+        if oldest:
+            stale_hint += f" · oldest {fmt_days(oldest['age_days'])} (#{oldest['number']})"
+    else:
+        stale_hint = "No open PRs"
+
+    kpi_grid([
+        {"label": "Median Time to Merge", "value": fmt_days(metrics["median_days_to_merge"]), "icon": "merge", "tone": "blue", "hint": merged_hint},
+        {"label": "Average Time to Merge", "value": fmt_days(metrics["average_days_to_merge"]), "icon": "merge", "tone": "violet", "hint": merged_hint},
+        {"label": "Closed Without Merge", "value": fmt_int(metrics["closed_unmerged_count"]), "icon": "pull_request", "tone": "warning", "hint": unmerged_hint},
+        {"label": f"Open Over {STALE_PR_DAYS} Days", "value": fmt_int(metrics["stale_open_count"]), "icon": "alert", "tone": "warning", "hint": stale_hint},
+    ])
+
+    monthly = analysis["pull_request_monthly"]
+
+    if not monthly.empty:
+
+        visual_card(
+            "pr_monthly",
+            "Pull requests per month",
+            "Pull requests opened each month, and pull requests from this window merged or closed without merge each month.",
+            fig=grouped_monthly_figure(
+                monthly,
+                [
+                    ("opened", "Opened", CHART_COLORS[0]),
+                    ("merged", "Merged", CHART_COLORS[1]),
+                    ("closed_unmerged", "Closed without merge", THEME["warning"]),
+                ],
+            ),
+            df=monthly,
+            column_config={
+                "month": st.column_config.TextColumn("Month"),
+                "opened": st.column_config.NumberColumn("Opened", format="%d"),
+                "merged": st.column_config.NumberColumn("Merged", format="%d"),
+                "closed_unmerged": st.column_config.NumberColumn("Closed without merge", format="%d"),
+            },
+            height=320,
+        )
+
+    aging = analysis["pull_request_aging"]
+
+    if metrics["open_count"] and not aging.empty:
+
+        visual_card(
+            "pr_aging",
+            "Open pull request aging",
+            f"How long currently open pull requests have been waiting. The last band is stale (over {STALE_PR_DAYS} days).",
+            fig=age_band_figure(aging),
+            df=aging,
+            column_config={
+                "age_band": st.column_config.TextColumn("Age"),
+                "count": st.column_config.NumberColumn("Open PRs", format="%d"),
+                "share": st.column_config.NumberColumn("Share of open", format="%.1f%%"),
+            },
+            height=280,
+        )
+
+    render_methodology(
+        "pr_health_method",
+        "How pull request health is calculated",
+        "Each figure above follows these rules.",
+        PR_HEALTH_METHODS,
+        PR_HEALTH_FOOT,
+    )
+
+
+def render_release_cadence(analysis):
+
+    metrics = analysis.get("release_cadence") or {}
+
+    if not metrics or not metrics.get("published_count"):
+        return
+
+    section_header(
+        "Release Cadence",
+        "How regularly releases are published and how long ago the latest one shipped.",
+        "tag",
+    )
+
+    if metrics["median_interval_days"] is not None:
+        median_hint = f"Between {fmt_int(metrics['published_count'])} releases"
+        longest_hint = f"Shortest gap {fmt_days(metrics['shortest_interval_days'])}"
+    else:
+        median_hint = "Needs at least 2 releases"
+        longest_hint = "Needs at least 2 releases"
+
+    if metrics["cadence_label"]:
+        label_value = metrics["cadence_label"]
+        label_hint = f"Median gap {fmt_days(metrics['median_interval_days'])}"
+    else:
+        label_value = "N/A"
+        label_hint = metrics["cadence_reason"]
+
+    kpi_grid([
+        {"label": "Cadence", "value": label_value, "icon": "tag", "tone": "violet", "wrap_text": True, "hint": label_hint},
+        {"label": "Median Interval", "value": fmt_days(metrics["median_interval_days"]), "icon": "clock", "tone": "blue", "hint": median_hint},
+        {"label": "Latest Release Age", "value": fmt_days(metrics["latest_age_days"]), "icon": "package", "tone": "success", "hint": metrics["latest_tag"]},
+        {"label": "Longest Gap", "value": fmt_days(metrics["longest_interval_days"]), "icon": "calendar", "tone": "warning", "hint": longest_hint},
+    ])
+
+    intervals = analysis["release_intervals"]
+
+    if not intervals.empty:
+
+        table = intervals.sort_values("published_at", ascending=False)
+
+        visual_card(
+            "release_intervals",
+            "Days between releases",
+            "Gap between each release and the one before it, with the median shown as a dashed line.",
+            fig=release_interval_figure(intervals, metrics["median_interval_days"]),
+            df=table,
+            column_config={
+                "tag": st.column_config.TextColumn("Release"),
+                "published_at": st.column_config.DatetimeColumn("Published", format="D MMM YYYY"),
+                "days_since_previous": st.column_config.NumberColumn("Days since previous release", format="%.1f"),
+            },
+            height=320,
+        )
+
+    render_methodology(
+        "release_cadence_method",
+        "How release cadence is calculated",
+        "Each figure above follows these rules.",
+        RELEASE_CADENCE_METHODS,
+        RELEASE_CADENCE_FOOT,
+    )
+
+
+def render_repository_snapshot(analysis, selected):
+
+    repository = analysis["repository"]
+    now = pd.Timestamp.now(tz="UTC")
+
+    section_header(
+        "Repository Snapshot",
+        "The headline numbers from every section below, in one place.",
+        "bulb",
+    )
+
+    area_tones = {"High": "success", "Good": "success", "Medium": "blue", "Fair": "blue", "Low": "warning", "Poor": "warning"}
+    cards = []
+
+    areas = calculate_snapshot_areas(analysis.get("health_score"))
+
+    if any(area["score"] is not None for area in areas):
+
+        for area in areas:
+
+            cards.append({
+                "label": area["name"],
+                "value": area["label"],
+                "icon": HEALTH_ICONS.get(area["key"], "activity"),
+                "tone": area_tones.get(area["label"], ""),
+                "hint": f"Score {area['score']} / 100" if area["score"] is not None else area["reason"],
+            })
+
+    created = to_timestamp(repository.get("created_at"))
+    pushed = to_timestamp(repository.get("pushed_at"))
+
+    if created is not None:
+        cards.append({
+            "label": "Repository Age",
+            "value": fmt_days((now - created).total_seconds() / 86400),
+            "icon": "calendar",
+            "tone": "blue",
+            "hint": f"Created {fmt_date(created)}",
+        })
+
+    if pushed is not None:
+        cards.append({
+            "label": "Last Push",
+            "value": fmt_date(pushed),
+            "icon": "upload",
+            "tone": "violet",
+            "hint": f"{fmt_days(max(0.0, (now - pushed).total_seconds() / 86400))} ago",
+        })
+
+    health = analysis.get("health_score") or {}
+
+    if health.get("overall") is not None:
+        cards.append({
+            "label": "Health Score",
+            "value": f"{health['overall']} / 100",
+            "icon": "activity",
+            "tone": health_tone(health["overall"]),
+            "hint": health["label"],
+        })
+
+    if "Commits" in selected:
+
+        velocity = analysis.get("commit_velocity") or {}
+        total = (analysis.get("commit_metrics") or {}).get("total_commits", 0)
+
+        if velocity.get("per_week") is not None:
+            commit_hint = f"{fmt_rate(velocity['per_week'])} per week"
+        elif velocity.get("per_day") is not None:
+            commit_hint = f"{fmt_rate(velocity['per_day'])} per day"
+        else:
+            commit_hint = "No commits in this window"
+
+        cards.append({"label": "Commits", "value": fmt_int(total), "icon": "commit", "tone": "blue", "hint": commit_hint})
+
+    if "Contributors" in selected:
+
+        contributors = analysis.get("contributor_metrics") or {}
+        concentration = analysis.get("contributor_concentration") or {}
+        count = contributors.get("total_contributors", 0)
+
+        cards.append({
+            "label": "Contributors",
+            "value": fmt_int(count),
+            "icon": "users",
+            "tone": "violet",
+            "hint": f"Top 5 share {format_percentage(concentration.get('top_5_contributor_concentration', 0.0))}" if count else "No contributors found",
+        })
+
+    if "Issues" in selected:
+
+        issue_metrics = analysis.get("issue_metrics") or {}
+        resolution = analysis.get("issue_resolution") or {}
+        total = issue_metrics.get("total_issues", 0)
+
+        if total:
+            hint = f"of {fmt_int(total)} · median close {fmt_days(resolution.get('median_days_to_close'))}"
+        else:
+            hint = "No issues in this window"
+
+        cards.append({"label": "Issues Still Open", "value": fmt_int(issue_metrics.get("open_issues", 0)), "icon": "issue", "tone": "warning", "hint": hint})
+
+    if "Pull Requests" in selected:
+
+        pr_metrics = analysis.get("pull_request_metrics") or {}
+        pr_health = analysis.get("pull_request_health") or {}
+        total = pr_metrics.get("total_pull_requests", 0)
+
+        if total:
+            hint = f"of {fmt_int(total)} · median merge {fmt_days(pr_health.get('median_days_to_merge'))}"
+        else:
+            hint = "No pull requests in this window"
+
+        cards.append({"label": "PRs Still Open", "value": fmt_int(pr_metrics.get("open_pull_requests", 0)), "icon": "pull_request", "tone": "warning", "hint": hint})
+
+    if "Releases" in selected:
+
+        cadence = analysis.get("release_cadence") or {}
+
+        if cadence.get("published_count"):
+            hint = f"{fmt_days(cadence['latest_age_days'])} ago"
+            if cadence.get("cadence_label"):
+                hint += f" · {cadence['cadence_label']}"
+            cards.append({"label": "Latest Release", "value": cadence["latest_tag"], "icon": "tag", "tone": "success", "wrap_text": True, "hint": hint})
+        else:
+            cards.append({"label": "Latest Release", "value": "N/A", "icon": "tag", "tone": "success", "hint": "No published releases in this window"})
+
+    for start in range(0, len(cards), 4):
+        kpi_grid(cards[start:start + 4])
+
+    render_html(
+        f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+        f'<span class="gs-period-note__icon">{icon("info", 15, 1.9)}</span>'
+        f'<span>Every figure here is taken from the section that follows it; nothing is calculated separately. '
+        f'Repository age and last push are repository-level, and the rest cover the selected analysis window. '
+        f'Area ratings are bands of the health score components.</span>'
+        f'</div>'
+    )
+
+    render_methodology(
+        "snapshot_method",
+        "How the area ratings are assigned",
+        "Each rating above follows these rules.",
+        SNAPSHOT_METHODS,
+        SNAPSHOT_FOOT,
+    )
+
 
 def init_state():
 
@@ -2185,12 +4220,26 @@ def init_state():
         "analyzed_repo": None,
         "error": None,
         "is_analyzing": False,
+        "refresh_requested": False,
+        "analysis_stamp": None,
+        "analyzed_period": None,
+        "xlsx_ready": {},
+        "workbook_ready": None,
+        "compare_url_a": "",
+        "compare_url_b": "",
+        "compare_period": COMPARISON_DEFAULT_PERIOD,
+        "comparison": None,
+        "compare_error": None,
+        "theme": DEFAULT_THEME,
     }
 
     for key, value in defaults.items():
 
         if key not in st.session_state:
             st.session_state[key] = value
+
+    if st.session_state.get("theme") not in THEMES:
+        st.session_state["theme"] = DEFAULT_THEME
 
 
 def toggle_analysis(name):
@@ -2280,6 +4329,7 @@ def render_control_panel():
         st.selectbox(
             "Analysis period",
             PERIOD_OPTIONS,
+            index=PERIOD_OPTIONS.index("All Time") if "All Time" in PERIOD_OPTIONS else 0,
             key="selected_period",
             label_visibility="collapsed",
         )
@@ -2314,6 +4364,91 @@ def render_control_panel():
     return analyze_clicked
 
 
+def error_state_for(exc):
+
+    extra = {
+        "reset_epoch": getattr(exc, "reset_epoch", None),
+        "retry_after": getattr(exc, "retry_after", None),
+        "secondary": getattr(exc, "secondary", False),
+    }
+
+    if isinstance(exc, RateLimitError):
+        kind = "rate_limit"
+    elif isinstance(exc, NotFoundError):
+        kind = "not_found"
+    elif isinstance(exc, AuthError):
+        kind = "auth"
+    elif isinstance(exc, AccessDeniedError):
+        kind = "access_denied"
+    elif isinstance(exc, NetworkError):
+        kind = "network"
+    elif isinstance(exc, ServerError):
+        kind = "server"
+    elif isinstance(exc, GraphQLError):
+        kind = "graphql"
+    else:
+        kind = "api_error"
+
+    return (kind, str(exc), extra)
+
+
+def execute_analysis(owner, repo, selected, period, force_refresh=False):
+
+    st.session_state.error = None
+
+    placeholder = st.empty()
+    tracker = RunTracker()
+    chosen = sorted(selected)
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    future = executor.submit(
+        analyze_repository,
+        owner,
+        repo,
+        selected_analyses=list(selected) or None,
+        period=period,
+        force_refresh=force_refresh,
+        progress=tracker,
+    )
+
+    try:
+
+        while True:
+
+            with placeholder.container():
+                loading_panel(owner, repo, chosen, period, tracker.snapshot())
+
+            finished, _ = wait([future], timeout=0.4)
+
+            if finished:
+                break
+
+        analysis = future.result()
+
+    except Exception as exc:
+
+        placeholder.empty()
+
+        st.session_state.analysis = None
+        st.session_state.error = error_state_for(exc)
+
+        return
+
+    finally:
+        executor.shutdown(wait=False)
+
+    placeholder.empty()
+
+    st.session_state.analysis = analysis
+    st.session_state.analyzed_owner = owner
+    st.session_state.analyzed_repo = repo
+    st.session_state.ran_selected = list(selected)
+    st.session_state.analyzed_period = period
+    st.session_state.analysis_stamp = analysis["fetched_at"].isoformat()
+    st.session_state.xlsx_ready = {}
+    st.session_state.workbook_ready = None
+
+
 def run_analysis():
 
     owner, repo = parse_github_url(st.session_state.repo_url)
@@ -2323,65 +4458,508 @@ def run_analysis():
         st.session_state.error = (
             "invalid_url",
             "That doesn't look like a GitHub repository URL. "
-            "Use the form https://github.com/owner/repository."
+            "Use the form https://github.com/owner/repository.",
+            None,
         )
         st.session_state.analysis = None
 
         return
 
-    st.session_state.error = None
+    execute_analysis(
+        owner,
+        repo,
+        set(st.session_state.selected),
+        st.session_state.selected_period,
+    )
+
+
+def request_refresh():
+
+    st.session_state.refresh_requested = True
+
+
+def refresh_analysis():
+
+    execute_analysis(
+        st.session_state.analyzed_owner,
+        st.session_state.analyzed_repo,
+        set(st.session_state.get("ran_selected", [])),
+        st.session_state.analyzed_period or "All Time",
+        force_refresh=True,
+    )
+
+
+def render_compare_panel():
+
+    with st.container(key="compare_panel"):
+
+        render_html(f"""
+        <div class="gs-field-label">
+            <b>{icon('scale', 16)} Compare two repositories</b>
+            <span>Side by side on the same period, using all six analyses</span>
+        </div>
+        """)
+
+        with st.container(key="compare_field"):
+
+            field_cols = st.columns(2, gap="small")
+
+            with field_cols[0]:
+                st.text_input(
+                    "First repository URL",
+                    key="compare_url_a",
+                    placeholder="https://github.com/owner/first-repository",
+                    label_visibility="collapsed",
+                )
+
+            with field_cols[1]:
+                st.text_input(
+                    "Second repository URL",
+                    key="compare_url_b",
+                    placeholder="https://github.com/owner/second-repository",
+                    label_visibility="collapsed",
+                )
+
+        bottom = st.columns([1.3, 2.4, 1.3], gap="medium", vertical_alignment="center")
+
+        with bottom[0]:
+            st.selectbox(
+                "Comparison period",
+                PERIOD_OPTIONS,
+                key="compare_period",
+                label_visibility="collapsed",
+            )
+
+        with bottom[1]:
+            render_html(
+                '<div class="gs-foot-note">Large repositories over long periods take longer and use more GitHub API requests.</div>'
+            )
+
+        with bottom[2]:
+            with st.container(key="compare_cta"):
+                compare_clicked = st.button(
+                    "Compare repositories",
+                    key="compare_btn",
+                    icon=":material/compare_arrows:",
+                    width="stretch",
+                )
+
+    return compare_clicked
+
+
+def clear_comparison():
+
+    st.session_state.comparison = None
+    st.session_state.compare_error = None
+
+
+def execute_comparison(owner_a, repo_a, owner_b, repo_b, period):
+
+    st.session_state.compare_error = None
+    st.session_state.comparison = None
 
     placeholder = st.empty()
-
-    with placeholder.container():
-        loading_panel(owner, repo, sorted(st.session_state.selected), st.session_state.selected_period)
+    executor = ThreadPoolExecutor(max_workers=1)
+    results = []
+    current = f"{owner_a}/{repo_a}"
 
     try:
 
-        analysis = analyze_repository(
-            owner,
-            repo,
-            selected_analyses=list(st.session_state.selected) or None,
-            period=st.session_state.selected_period,
-        )
+        for owner, repo in ((owner_a, repo_a), (owner_b, repo_b)):
+
+            current = f"{owner}/{repo}"
+            tracker = RunTracker()
+
+            future = executor.submit(
+                analyze_repository,
+                owner,
+                repo,
+                selected_analyses=list(ANALYSIS_OPTIONS),
+                period=period,
+                progress=tracker,
+            )
+
+            while True:
+
+                with placeholder.container():
+                    loading_panel(owner, repo, list(ANALYSIS_OPTIONS), period, tracker.snapshot())
+
+                finished, _ = wait([future], timeout=0.4)
+
+                if finished:
+                    break
+
+            results.append(future.result())
 
     except Exception as exc:
 
         placeholder.empty()
 
-        st.session_state.analysis = None
-        st.session_state.error = ("api_error", str(exc))
+        kind, message, extra = error_state_for(exc)
+        st.session_state.compare_error = (kind, f"While loading {current}: {message}", extra)
 
         return
 
+    finally:
+        executor.shutdown(wait=False)
+
     placeholder.empty()
 
-    st.session_state.analysis = analysis
-    st.session_state.analyzed_owner = owner
-    st.session_state.analyzed_repo = repo
-    st.session_state.ran_selected = list(st.session_state.selected)
+    st.session_state.comparison = build_repository_comparison(results[0], results[1])
 
 
-def render_error(kind, message):
+def run_comparison():
+
+    owner_a, repo_a = parse_github_url(st.session_state.compare_url_a)
+    owner_b, repo_b = parse_github_url(st.session_state.compare_url_b)
+
+    st.session_state.comparison = None
+
+    if not owner_a or not repo_a or not owner_b or not repo_b:
+
+        st.session_state.compare_error = (
+            "invalid_url",
+            "Enter two GitHub repository URLs in the form https://github.com/owner/repository.",
+            None,
+        )
+
+        return
+
+    if f"{owner_a}/{repo_a}".lower() == f"{owner_b}/{repo_b}".lower():
+
+        st.session_state.compare_error = (
+            "invalid_url",
+            "Choose two different repositories to compare.",
+            None,
+        )
+
+        return
+
+    execute_comparison(owner_a, repo_a, owner_b, repo_b, st.session_state.compare_period)
+
+
+def format_compare_value(kind, value):
+
+    if is_missing(value):
+        return "N/A"
+
+    if kind == "int":
+        return fmt_int(value)
+
+    if kind == "rate":
+        return fmt_rate(value)
+
+    if kind == "percent":
+        return format_percentage(float(value))
+
+    if kind == "signed_percent":
+        return f"{float(value):+.1f}%"
+
+    if kind == "days":
+        return fmt_days(value)
+
+    if kind == "score":
+        return f"{int(round(float(value)))}/100"
+
+    return str(value)
+
+
+def compare_cell(kind, value, leads):
+
+    text = format_compare_value(kind, value)
+    classes = "gs-cmp__val"
+
+    if text == "N/A":
+        classes += " gs-cmp__val--na"
+
+    dot = ""
+
+    if leads:
+        classes += " gs-cmp__val--lead"
+        dot = '<span class="gs-cmp__dot"></span>'
+
+    return f'<div class="{classes}">{dot}<span>{esc(text)}</span></div>'
+
+
+def compare_health_figure(health_chart, name_a, name_b):
+
+    labels = [item["name"] for item in health_chart]
+
+    fig = go.Figure()
+
+    for field, name, color in (
+        ("a", name_a, CHART_COLORS[0]),
+        ("b", name_b, CHART_COLORS[1]),
+    ):
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=[item[field] for item in health_chart],
+                name=name,
+                marker_color=color,
+                texttemplate="%{y:.0f}",
+                textposition="outside",
+                cliponaxis=False,
+            )
+        )
+
+    _style_figure(fig, height=340)
+
+    fig.update_layout(barmode="group", bargap=0.32)
+    fig.update_yaxes(range=[0, 110], title_text="Score out of 100")
+
+    return fig
+
+
+def render_comparison_results(comparison):
+
+    name_a = comparison["name_a"]
+    name_b = comparison["name_b"]
+    values_a = comparison["values_a"]
+    values_b = comparison["values_b"]
+    wins = comparison["wins"]
+    compared = comparison["compared"]
+
+    section_header(
+        "Repository Comparison",
+        f"{name_a} and {name_b} side by side over {comparison['period']}.",
+        "scale",
+    )
+
+    clear_cols = st.columns([1, 0.2], gap="small")
+
+    with clear_cols[1]:
+        st.button("Clear comparison", key="compare_clear_btn", on_click=clear_comparison, width="stretch")
+
+    kpi_grid([
+        {
+            "label": f"{shorten(name_a, 26)} Health",
+            "value": format_compare_value("score", values_a.get("health_overall")),
+            "icon": "activity",
+            "tone": "violet",
+            "hint": f"Higher on {fmt_int(wins['a'])} of {fmt_int(compared)} rows",
+        },
+        {
+            "label": f"{shorten(name_b, 26)} Health",
+            "value": format_compare_value("score", values_b.get("health_overall")),
+            "icon": "activity",
+            "tone": "blue",
+            "hint": f"Higher on {fmt_int(wins['b'])} of {fmt_int(compared)} rows",
+        },
+        {
+            "label": f"{shorten(name_a, 26)} Commits / Day",
+            "value": format_compare_value("rate", values_a.get("commits_per_day")),
+            "icon": "commit",
+            "tone": "violet",
+        },
+        {
+            "label": f"{shorten(name_b, 26)} Commits / Day",
+            "value": format_compare_value("rate", values_b.get("commits_per_day")),
+            "icon": "commit",
+            "tone": "blue",
+        },
+    ])
+
+    table_rows = []
+    export_rows = []
+
+    for group in comparison["groups"]:
+
+        table_rows.append(f'<div class="gs-cmp__group">{esc(group["name"])}</div>')
+
+        for row in group["rows"]:
+
+            table_rows.append(
+                f"""
+                <div class="gs-cmp__row">
+                    <div class="gs-cmp__metric">{esc(row['metric'])}</div>
+                    {compare_cell(row['kind'], row['a'], row['leader'] == 'a')}
+                    {compare_cell(row['kind'], row['b'], row['leader'] == 'b')}
+                </div>
+                """
+            )
+
+            export_rows.append({
+                "Group": group["name"],
+                "Metric": row["metric"],
+                name_a: format_compare_value(row["kind"], row["a"]),
+                name_b: format_compare_value(row["kind"], row["b"]),
+            })
+
+    with card_open(
+        "compare_table",
+        "Side-by-side comparison",
+        "A dot marks the higher value on counts, rates and health scores. Higher does not mean better.",
+    ):
+        render_html(f"""
+        <div class="gs-cmp">
+            <div class="gs-cmp__head">
+                <div></div>
+                <div>{esc(name_a)}</div>
+                <div>{esc(name_b)}</div>
+            </div>
+            {''.join(table_rows)}
+        </div>
+        """)
+
+    visual_card(
+        "compare_health",
+        "Health score breakdown",
+        "The five health components for each repository. Components that could not be measured are left empty.",
+        fig=compare_health_figure(comparison["health_chart"], name_a, name_b),
+        height=340,
+    )
+
+    insights = []
+
+    health_a = values_a.get("health_overall")
+    health_b = values_b.get("health_overall")
+
+    if not is_missing(health_a) and not is_missing(health_b):
+
+        if health_a == health_b:
+            health_body = (
+                f"Both repositories score <strong>{int(health_a)}/100</strong> overall."
+            )
+        else:
+            high, low = (name_a, name_b) if health_a > health_b else (name_b, name_a)
+            high_score, low_score = max(health_a, health_b), min(health_a, health_b)
+            health_body = (
+                f"<strong>{esc(high)}</strong> scores <strong>{int(high_score)}/100</strong> overall against "
+                f"<strong>{int(low_score)}/100</strong> for <strong>{esc(low)}</strong>."
+            )
+
+        insights.append({"icon": "activity", "title": "Health score", "body_html": health_body})
+
+    rate_a = values_a.get("commits_per_day")
+    rate_b = values_b.get("commits_per_day")
+
+    if not is_missing(rate_a) and not is_missing(rate_b):
+
+        insights.append({
+            "icon": "commit",
+            "title": "Commit pace",
+            "body_html": f"<strong>{esc(name_a)}</strong> averages <strong>{fmt_rate(rate_a)}</strong> commits per day "
+                         f"and <strong>{esc(name_b)}</strong> <strong>{fmt_rate(rate_b)}</strong> over {esc(comparison['period'])}.",
+        })
+
+    insights.append({
+        "icon": "scale",
+        "title": "Higher values",
+        "body_html": f"<strong>{esc(name_a)}</strong> is higher on <strong>{fmt_int(wins['a'])}</strong> of "
+                     f"<strong>{fmt_int(compared)}</strong> comparable rows, <strong>{esc(name_b)}</strong> on "
+                     f"<strong>{fmt_int(wins['b'])}</strong>, and <strong>{fmt_int(wins['tie'])}</strong> are tied.",
+    })
+
+    insight_cards(insights)
+
+    visual_card(
+        "compare_export",
+        "Repository comparison",
+        "The comparison as a table you can search and export.",
+        df=pd.DataFrame(export_rows),
+        height=520,
+    )
+
+    render_methodology(
+        "comparison_method",
+        "How the comparison works",
+        "Each figure above follows these rules.",
+        COMPARISON_METHODS,
+        COMPARISON_FOOT,
+    )
+
+
+def render_comparison_area():
+
+    if st.session_state.compare_error:
+
+        kind, message, extra = st.session_state.compare_error
+        render_error(kind, message, extra)
+
+    elif st.session_state.comparison is not None:
+
+        render_comparison_results(st.session_state.comparison)
+
+
+def fmt_reset(epoch):
+
+    stamp = to_timestamp(pd.to_datetime(epoch, unit="s", utc=True)) if epoch is not None else None
+
+    if stamp is None:
+        return "an unknown time"
+
+    return f"{stamp.strftime('%H:%M')} UTC"
+
+
+def fmt_reset_in(epoch):
+
+    if epoch is None:
+        return "at an unknown time"
+
+    seconds = int(epoch - time.time())
+
+    if seconds <= 0:
+        return "now"
+
+    minutes = max(1, round(seconds / 60))
+
+    if minutes < 60:
+        return f"in {minutes} minute{'s' if minutes != 1 else ''}"
+
+    hours, rest = divmod(minutes, 60)
+
+    return f"in {hours} h {rest} min" if rest else f"in {hours} h"
+
+
+def reset_phrase(extra):
+
+    extra = extra or {}
+    retry_after = extra.get("retry_after")
+    reset_epoch = extra.get("reset_epoch")
+
+    if retry_after is not None:
+        return f"GitHub asks you to wait about {fmt_int(retry_after)} second(s) before trying again."
+
+    if reset_epoch is not None:
+
+        remaining = max(0, int(reset_epoch - pd.Timestamp.now(tz="UTC").timestamp()))
+
+        return f"The allowance resets at {fmt_reset(reset_epoch)}, in about {max(1, round(remaining / 60))} minute(s)."
+
+    return "GitHub did not say when the allowance resets, so try again in a few minutes."
+
+
+def render_error(kind, message, extra=None):
 
     if kind == "invalid_url":
 
         notice("warning", "Check the repository URL", message)
         return
 
-    lowered = message.lower()
+    if kind == "rate_limit":
 
-    if "rate limit" in lowered:
+        if (extra or {}).get("secondary"):
+            title = "GitHub is slowing requests down"
+            body = (
+                "GitHub applied a secondary rate limit because many requests were sent in a short time. "
+                + reset_phrase(extra)
+            )
+        else:
+            title = "GitHub API rate limit reached"
+            body = (
+                "RepoMetric has used the GitHub API allowance available to it. "
+                + reset_phrase(extra)
+                + (
+                    ""
+                    if GITHUB_TOKEN
+                    else " Add a GITHUB_TOKEN to raise the limit."
+                )
+            )
 
-        notice(
-            "error",
-            "GitHub API rate limit reached",
-            "RepoMetric has hit GitHub's API rate limit for this token. "
-            "Add a GITHUB_TOKEN to raise the limit, or try again shortly.",
-            detail=message,
-        )
+        notice("error", title, body, detail=message)
 
-    elif "404" in message:
+    elif kind == "not_found":
 
         notice(
             "error",
@@ -2391,13 +4969,51 @@ def render_error(kind, message):
             detail=message,
         )
 
-    elif "403" in lowered:
+    elif kind == "access_denied":
 
         notice(
             "error",
             "Access denied by GitHub",
             "GitHub refused this request. The repository may be private, or the API token "
             "may lack the required permissions.",
+            detail=message,
+        )
+
+    elif kind == "auth":
+
+        notice(
+            "error",
+            "GitHub rejected the access token",
+            "The GITHUB_TOKEN in use is invalid, expired or revoked. Replace it with a valid token, "
+            "or remove it to continue with unauthenticated access and its lower rate limit.",
+            detail=message,
+        )
+
+    elif kind == "network":
+
+        notice(
+            "error",
+            "Couldn't reach GitHub",
+            "The connection to the GitHub API failed after several attempts. "
+            "Check the network connection and try again.",
+            detail=message,
+        )
+
+    elif kind == "server":
+
+        notice(
+            "error",
+            "GitHub is having trouble",
+            "GitHub's servers returned an error. This is usually temporary, so try again in a moment.",
+            detail=message,
+        )
+
+    elif kind == "graphql":
+
+        notice(
+            "error",
+            "GitHub GraphQL returned an error",
+            "The issues request was rejected by GitHub's GraphQL API.",
             detail=message,
         )
 
@@ -2409,6 +5025,865 @@ def render_error(kind, message):
             "Something went wrong while talking to the GitHub API.",
             detail=message,
         )
+
+
+def rate_buckets(info):
+
+    buckets = (info or {}).get("buckets") or {}
+    rows = []
+
+    for name, label in (("core", "REST"), ("graphql", "GraphQL")):
+
+        bucket = buckets.get(name)
+
+        if bucket and bucket.get("limit") and bucket.get("remaining") is not None:
+            rows.append((label, bucket))
+
+    return rows
+
+
+def rate_is_low(info):
+
+    low_share = (info or {}).get("low_share", 0.10)
+
+    return any(bucket["remaining"] / bucket["limit"] < low_share for _, bucket in rate_buckets(info))
+
+
+def render_rate_limit_bar(analysis):
+
+    info = analysis.get("rate_limit") or {}
+    rows = rate_buckets(info)
+
+    if not rows:
+
+        text = "GitHub did not report rate-limit information for this run."
+
+        render_html(
+            f'<div class="gs-rate"><div class="gs-rate__foot">{esc(text)}</div></div>'
+        )
+
+        return
+
+    low_share = info.get("low_share", 0.10)
+    items = []
+
+    for label, bucket in rows:
+
+        share = bucket["remaining"] / bucket["limit"]
+        color = THEME["warning"] if share < low_share else THEME["success"]
+
+        items.append(
+            f'<div class="gs-rate__row">'
+            f'<span class="gs-rate__name">{esc(label)}</span>'
+            f'<div class="gs-meter"><div class="gs-meter__fill" style="width:{max(2.0, share * 100):.1f}%;background:{color};"></div></div>'
+            f'<span class="gs-rate__text">{fmt_int(bucket["remaining"])} of {fmt_int(bucket["limit"])} left &middot; resets {esc(fmt_reset_in(bucket["reset"]))} ({esc(fmt_reset(bucket["reset"]))})</span>'
+            f'</div>'
+        )
+
+    foot_parts = []
+
+    if info.get("from_cache"):
+        foot_parts.append("No requests sent for this view; values are from the original fetch")
+    else:
+        foot_parts.append(f"{fmt_int(info.get('requests', 0))} request(s) sent for this run")
+
+    foot_parts.append("Authenticated with a token" if info.get("authenticated") else "No token configured, so GitHub's lower anonymous limit applies")
+
+    low = rate_is_low(info)
+    warn_class = " gs-rate--warn" if low else ""
+
+    if low:
+        foot_parts.append(f"Below {low_share * 100:.0f}% of the allowance remains")
+
+    render_html(
+        f'<div class="gs-rate{warn_class}">{"".join(items)}'
+        f'<div class="gs-rate__foot">{esc(" · ".join(foot_parts))}</div></div>'
+    )
+
+
+def fetched_status_html(analysis):
+
+    stamp = fmt_date(analysis.get("fetched_at"), with_time=True)
+    minutes = ANALYSIS_CACHE_TTL_SECONDS // 60
+
+    if analysis.get("from_cache"):
+        return (
+            f'<div class="gs-status"><b>Fetched {esc(stamp)} UTC</b> &middot; served from cache, '
+            f'{esc(fmt_age(analysis.get("cache_age_seconds")))} old. '
+            f'Results are reused for {minutes} minutes; use Refresh data to fetch again.</div>'
+        )
+
+    return (
+        f'<div class="gs-status"><b>Fetched {esc(stamp)} UTC</b> &middot; live from GitHub. '
+        f'This result is reused for {minutes} minutes if you analyze the same repository, modules and period again.</div>'
+    )
+
+
+def export_tables(analysis, selected):
+
+    tables = []
+
+    def add(name, df):
+
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            tables.append((name, df))
+
+    add("Summary metrics", build_summary_metrics_table(analysis, selected))
+
+    if "Commits" in selected:
+        commits = analysis["commits"]
+        add("Commits", commits[[c for c in ("date", "author", "message", "sha") if c in commits.columns]] if not commits.empty else commits)
+        add("Monthly commits", analysis["commit_monthly_trend"])
+        add("Weekly commits", analysis["commit_velocity_weekly"])
+        add("Commit activity heatmap", analysis.get("commit_heatmap_matrix"))
+
+    if "Contributors" in selected:
+        leaderboard = analysis.get("contributor_leaderboard")
+        add("Contributors", leaderboard if isinstance(leaderboard, pd.DataFrame) and not leaderboard.empty else analysis["contributors"])
+
+    if "Issues" in selected:
+        add("Issues", analysis["issues"])
+        add("Issues per month", analysis["issue_monthly"])
+        add("Open issue aging", analysis["issue_aging"])
+
+    if "Pull Requests" in selected:
+        add("Pull requests", analysis["pull_requests"])
+        add("Pull requests per month", analysis["pull_request_monthly"])
+        add("Open pull request aging", analysis["pull_request_aging"])
+
+    if "Languages" in selected:
+        add("Languages", analysis["languages"])
+
+    if "Releases" in selected:
+        add("Releases", analysis["releases"])
+        add("Release intervals", analysis["release_intervals"])
+
+    return tables
+
+
+def render_data_status(analysis, owner, repo, selected):
+
+    with card_open(
+        "data_status",
+        "Data and export",
+        "When this data was fetched, how much GitHub API allowance is left, and a workbook of every table.",
+    ):
+
+        render_html(fetched_status_html(analysis))
+        render_rate_limit_bar(analysis)
+
+        cols = st.columns([1, 1.6, 4], gap="small", vertical_alignment="center")
+
+        with cols[0]:
+            with st.container(key="atool_refresh"):
+                st.button("Refresh data", key="refresh_btn", on_click=request_refresh)
+
+        signature = (owner, repo, st.session_state.analysis_stamp, tuple(sorted(selected)))
+        ready = st.session_state.workbook_ready
+
+        with cols[1]:
+
+            if ready is not None and ready["signature"] == signature:
+                st.download_button(
+                    "Download workbook (.xlsx)",
+                    data=ready["data"],
+                    file_name=f"{export_file_stem('all-tables')}.xlsx",
+                    mime=XLSX_MIME,
+                    key="dl_all_xlsx",
+                    on_click="ignore",
+                )
+
+            elif st.button("Prepare Excel workbook", key="dl_all_xlsx_prep"):
+
+                with st.spinner("Building the workbook"):
+                    data, notes = tables_to_excel_bytes(export_tables(analysis, selected))
+
+                st.session_state.workbook_ready = {
+                    "signature": signature,
+                    "data": data,
+                    "notes": notes,
+                }
+                st.rerun()
+
+        if ready is not None and ready["signature"] == signature and ready["notes"]:
+            notice("warning", "Some tables were shortened", " ".join(ready["notes"]))
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_rate_limit_status():
+
+    return get_rate_limit_status()
+
+
+def live_rate_rows_html(status):
+
+    low_share = status.get("low_share", 0.10)
+    rows = []
+
+    for label, bucket in rate_buckets(status):
+
+        share = bucket["remaining"] / bucket["limit"]
+        color = THEME["warning"] if share < low_share else THEME["success"]
+
+        rows.append(
+            f'<div class="gs-rate__row">'
+            f'<span class="gs-rate__name">{esc(label)}</span>'
+            f'<div class="gs-meter"><div class="gs-meter__fill" style="width:{max(2.0, share * 100):.1f}%;background:{color};"></div></div>'
+            f'<span class="gs-rate__count">{fmt_int(bucket["remaining"])} / {fmt_int(bucket["limit"])}</span>'
+            f'<span class="gs-rate__text">Reset {esc(fmt_reset_in(bucket["reset"]))} &middot; {esc(fmt_reset(bucket["reset"]))}</span>'
+            f'</div>'
+        )
+
+    return "".join(rows)
+
+
+def live_rate_message(status):
+
+    reason = status.get("reason")
+
+    if reason == "auth":
+        return "GitHub rejected the configured GITHUB_TOKEN, so the API status cannot be read. Check the token or remove it to use anonymous access."
+
+    if reason == "network":
+        return "GitHub could not be reached, so the API status is unavailable right now."
+
+    return "GitHub did not return rate-limit information, so the API status is unavailable right now."
+
+
+@st.fragment(run_every="60s")
+def render_live_rate_limit():
+
+    status = cached_rate_limit_status()
+
+    with card_open(
+        "api_status",
+        "GitHub API status",
+        "Live allowance read from GitHub's rate-limit endpoint, which does not count against your requests.",
+    ):
+
+        if not status.get("ok"):
+
+            render_html(
+                f'<div class="gs-rate"><div class="gs-rate__foot">{esc(live_rate_message(status))}</div></div>'
+            )
+
+        else:
+
+            low = rate_is_low(status)
+            foot = [
+                "Authenticated with a token" if status.get("authenticated") else "No token configured, so GitHub's lower anonymous limit applies",
+                f"Checked {esc(fmt_age(time.time() - status['checked_at']))} ago",
+            ]
+
+            if low:
+                foot.append(f"Below {status['low_share'] * 100:.0f}% of the allowance remains")
+
+            render_html(
+                f'<div class="gs-rate{" gs-rate--warn" if low else ""}">{live_rate_rows_html(status)}'
+                f'<div class="gs-rate__foot">{" · ".join(foot)}</div></div>'
+            )
+
+        if st.button("Check now", key="rate_limit_check"):
+            cached_rate_limit_status.clear()
+            st.rerun(scope="fragment")
+
+
+def render_api_usage(analysis):
+
+    info = analysis.get("rate_limit") or {}
+    rows = rate_buckets(info)
+
+    section_header(
+        "API Usage and Exports",
+        "How much of GitHub's API allowance this analysis used, and how the search and export tools work.",
+        "activity",
+    )
+
+    cards = []
+
+    for label, bucket in rows:
+        cards.append({
+            "label": f"{label} Remaining",
+            "value": fmt_int(bucket["remaining"]),
+            "icon": "activity",
+            "tone": "warning" if bucket["remaining"] / bucket["limit"] < info.get("low_share", 0.10) else "success",
+            "hint": f"of {fmt_int(bucket['limit'])} · resets {fmt_reset(bucket['reset'])}",
+        })
+
+    if not rows:
+        cards.append({
+            "label": "Rate Limit",
+            "value": "Not reported",
+            "icon": "info",
+            "tone": "",
+            "hint": "GitHub sent no rate-limit headers",
+        })
+
+    cards.append({
+        "label": "Requests This Run",
+        "value": fmt_int(info.get("requests", 0)),
+        "icon": "commit",
+        "tone": "blue",
+        "hint": "Served from cache" if info.get("from_cache") else "Including retries",
+    })
+
+    cards.append({
+        "label": "Authentication",
+        "value": "Token" if info.get("authenticated") else "No token",
+        "icon": "lock",
+        "tone": "violet",
+        "hint": "GITHUB_TOKEN is set" if info.get("authenticated") else "Anonymous, lower limit",
+    })
+
+    for start in range(0, len(cards), 4):
+        kpi_grid(cards[start:start + 4])
+
+    render_methodology(
+        "rate_limit_method",
+        "How the API usage figures are read",
+        "Each figure above follows these rules.",
+        RATE_LIMIT_METHODS,
+        RATE_LIMIT_FOOT,
+    )
+
+    render_methodology(
+        "table_tools_method",
+        "How table search, filters and exports work",
+        "Applies to every table in this report.",
+        TABLE_TOOLS_METHODS,
+        TABLE_TOOLS_FOOT,
+    )
+
+
+def render_trend_detection(analysis):
+
+    trends = analysis.get("trend_detection") or {}
+    rows = trends.get("rows") or []
+
+    if not rows:
+        return
+
+    section_header(
+        "Trend Detection",
+        "Whether commit, issue and pull request activity is rising, steady or falling across the analysis window.",
+        "trending",
+    )
+
+    tones = {"Increasing": "success", "Stable": "blue", "Declining": "warning"}
+    cards = []
+
+    for row in rows:
+
+        if row["label"] == "Not enough data":
+            hint = f"Fewer than {TREND_MIN_EVENTS} {row['unit']} in this window"
+        elif row["change"] is None:
+            hint = f"{fmt_int(row['later'])} vs {fmt_int(row['earlier'])} {row['unit']}"
+        else:
+            hint = f"{row['change']:+.0f}% · {fmt_int(row['later'])} vs {fmt_int(row['earlier'])} {row['unit']}"
+
+        cards.append({
+            "label": row["name"],
+            "value": f"{row['arrow']} {row['label']}",
+            "icon": "trending",
+            "tone": tones.get(row["label"], ""),
+            "hint": hint,
+        })
+
+    kpi_grid(cards)
+
+    insight_cards(
+        [
+            {"icon": "trending", "title": row["name"], "body_html": esc(row["sentence"])}
+            for row in rows
+        ],
+        stack=True,
+    )
+
+    start = to_timestamp(trends.get("window_start"))
+    mid = to_timestamp(trends.get("midpoint"))
+    end = to_timestamp(trends.get("window_end"))
+
+    if start is not None and mid is not None and end is not None:
+        render_html(
+            f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+            f'<span class="gs-period-note__icon">{icon("calendar", 15, 1.9)}</span>'
+            f'<span>Earlier half: {esc(fmt_date(start))} – {esc(fmt_date(mid))} · '
+            f'Later half: {esc(fmt_date(mid))} – {esc(fmt_date(end))}</span>'
+            f'</div>'
+        )
+
+    render_methodology(
+        "trend_method",
+        "How trends are classified",
+        "Each label above follows these rules.",
+        TREND_METHODS,
+        TREND_FOOT,
+    )
+
+
+TIMELINE_MAX_RELEASE_CHIPS = 6
+
+
+def repository_timeline_figure(timeline):
+
+    rows = timeline["rows"]
+    series = {item["key"]: item for item in timeline["series"]}
+    x = [row["month_start"] for row in rows]
+    period = dict(xperiod="M1", xperiodalignment="middle")
+
+    has_bars = "commits" in series
+    line_keys = [key for key in ("issues", "pull_requests") if key in series]
+    line_axis = "y2" if has_bars else "y"
+    line_colors = {"issues": CHART_COLORS[3], "pull_requests": CHART_COLORS[1]}
+
+    fig = go.Figure()
+
+    if has_bars:
+        fig.add_trace(go.Bar(
+            x=x, y=[row["commits"] for row in rows],
+            name="Commits",
+            marker=dict(color=CHART_COLORS[0], line=dict(width=0)),
+            hovertemplate="<b>%{y:,}</b> commits<extra></extra>",
+            **period,
+        ))
+
+    for key in line_keys:
+        fig.add_trace(go.Scatter(
+            x=x, y=[row[key] for row in rows],
+            mode="lines+markers",
+            name=series[key]["name"],
+            yaxis=line_axis,
+            line=dict(color=line_colors[key], width=2.2),
+            marker=dict(size=6),
+            hovertemplate="<b>%{y:,}</b> " + series[key]["unit"] + "<extra></extra>",
+            **period,
+        ))
+
+    release_rows = [
+        release
+        for row in rows
+        for release in row["releases"]
+    ]
+
+    if release_rows:
+
+        if has_bars and line_keys:
+            axis = "y2"
+            values = [row[key] for row in rows for key in line_keys]
+        elif has_bars:
+            axis = "y"
+            values = [row["commits"] for row in rows]
+        else:
+            axis = "y"
+            values = [row[key] for row in rows for key in line_keys]
+
+        top = max(values, default=0)
+        height = max(top * 1.12, 1)
+
+        fig.add_trace(go.Scatter(
+            x=[release["published_at"] for release in release_rows],
+            y=[height] * len(release_rows),
+            mode="markers",
+            name="Releases",
+            yaxis=axis,
+            marker=dict(
+                symbol="diamond",
+                size=11,
+                color=[
+                    CHART_COLORS[6] if release["prerelease"] else THEME["accent_2"]
+                    for release in release_rows
+                ],
+                line=dict(color=THEME["surface"], width=1.5),
+            ),
+            customdata=[[release["tag"]] for release in release_rows],
+            hovertemplate="Release <b>%{customdata[0]}</b><extra></extra>",
+        ))
+
+    fig.update_xaxes(title_text=None)
+
+    if has_bars:
+        fig.update_yaxes(title_text="Commits", rangemode="tozero")
+
+    if has_bars and line_keys:
+        fig.update_layout(yaxis2=dict(
+            overlaying="y",
+            side="right",
+            title=dict(text="Issues and pull requests"),
+            rangemode="tozero",
+        ))
+    elif not has_bars and line_keys:
+        fig.update_yaxes(title_text="Issues and pull requests", rangemode="tozero")
+
+    if not has_bars and not line_keys:
+        fig.update_yaxes(visible=False, range=[0.5, 1.5])
+
+    fig.update_layout(bargap=0.25)
+
+    styled = _style_figure(fig, height=380, legend=True)
+
+    if has_bars and line_keys:
+        styled.update_layout(yaxis2=dict(showgrid=False))
+
+    return styled
+
+
+def timeline_month_html(row, series):
+
+    parts = []
+
+    for item in series:
+
+        value = row[item["key"]]
+
+        if not value:
+            continue
+
+        unit = item["singular"] if value == 1 else item["unit"]
+
+        parts.append(
+            f'<span style="color:{THEME["text"]};font-size:.92rem;">'
+            f'<b>{fmt_int(value)}</b> '
+            f'<span style="color:{THEME["text_3"]};">{esc(unit)}</span></span>'
+        )
+
+    visible = row["releases"][:TIMELINE_MAX_RELEASE_CHIPS]
+
+    for release in visible:
+
+        tone = THEME["warning"] if release["prerelease"] else THEME["accent_2"]
+        label = "Pre-release" if release["prerelease"] else "Release"
+
+        parts.append(
+            f'<span style="display:inline-flex;align-items:center;gap:.35rem;'
+            f'padding:.1rem .6rem;border-radius:999px;border:1px solid {tone};'
+            f'color:{tone};font-size:.82rem;">'
+            f'{icon("tag", 13, 2)}{esc(label)} {esc(release["tag"])}</span>'
+        )
+
+    hidden = len(row["releases"]) - len(visible)
+
+    if hidden > 0:
+        parts.append(
+            f'<span style="color:{THEME["text_3"]};font-size:.82rem;">'
+            f'+{fmt_int(hidden)} more releases</span>'
+        )
+
+    return (
+        f'<div style="display:grid;grid-template-columns:5.5rem 1fr;gap:.9rem;'
+        f'padding:.55rem 0;border-bottom:1px solid {THEME["border"]};">'
+        f'<div style="color:{THEME["text_2"]};font-weight:600;font-size:.9rem;">'
+        f'{esc(row["month_start"].strftime("%b %Y"))}</div>'
+        f'<div style="display:flex;flex-wrap:wrap;gap:.4rem 1rem;align-items:center;">'
+        f'{"".join(parts)}</div></div>'
+    )
+
+
+def render_repository_timeline(analysis):
+
+    timeline = analysis.get("repository_timeline") or {}
+    rows = timeline.get("rows") or []
+
+    if not rows:
+        return
+
+    section_header(
+        "Repository Timeline",
+        "Commits, issues, pull requests and releases combined into one month-by-month development story.",
+        "calendar",
+    )
+
+    first = timeline["first_month"].strftime("%b %Y")
+    last = timeline["last_month"].strftime("%b %Y")
+
+    cards = [
+        {
+            "label": "Active Months",
+            "value": fmt_int(timeline["active_months"]),
+            "icon": "calendar",
+            "tone": "blue",
+            "hint": first if first == last else f"{first} – {last}",
+        },
+    ]
+
+    if timeline["busiest"]:
+        cards.append({
+            "label": "Busiest Month",
+            "value": timeline["busiest"]["month_start"].strftime("%b %Y"),
+            "icon": "trending",
+            "tone": "success",
+            "hint": f"{fmt_int(timeline['busiest']['events'])} events",
+        })
+
+    if timeline["series"]:
+        cards.append({
+            "label": "Events Recorded",
+            "value": fmt_int(timeline["total_events"]),
+            "icon": "clock",
+            "tone": "violet",
+            "hint": ", ".join(item["name"] for item in timeline["series"]),
+        })
+
+    if timeline["has_releases"]:
+        cards.append({
+            "label": "Releases",
+            "value": fmt_int(timeline["release_count"]),
+            "icon": "tag",
+            "tone": "warning",
+            "hint": "Published in this window",
+        })
+
+    kpi_grid(cards)
+
+    table = timeline["table"].sort_values("month_start", ascending=False)
+
+    column_config = {
+        "month_start": st.column_config.DatetimeColumn("Month", format="MMM YYYY"),
+        "commits": st.column_config.NumberColumn("Commits", format="%d"),
+        "issues": st.column_config.NumberColumn("Issues opened", format="%d"),
+        "pull_requests": st.column_config.NumberColumn("Pull requests opened", format="%d"),
+        "releases": st.column_config.NumberColumn("Releases", format="%d"),
+        "release_tags": st.column_config.TextColumn("Release tags", width="medium"),
+    }
+
+    visual_card(
+        "repository_timeline",
+        "Monthly activity",
+        "Commits as bars, issues and pull requests as lines, and releases as diamonds.",
+        fig=repository_timeline_figure(timeline),
+        df=table,
+        column_config=column_config,
+        column_order=[column for column in column_config if column in table.columns],
+        height=380,
+    )
+
+    years = sorted({row["year"] for row in rows}, reverse=True)
+
+    with card_open(
+        "repository_timeline_story",
+        "Development story",
+        "Each year, newest first, with activity and releases per month.",
+    ):
+
+        for index, year in enumerate(years):
+
+            year_rows = [row for row in rows if row["year"] == year][::-1]
+            label = f"{year} · {len(year_rows)} active month{'s' if len(year_rows) != 1 else ''}"
+
+            with st.expander(label, expanded=index == 0):
+
+                render_html("".join(
+                    timeline_month_html(row, timeline["series"])
+                    for row in year_rows
+                ))
+
+    render_methodology(
+        "timeline_method",
+        "How the timeline is built",
+        "Each month above follows these rules.",
+        TIMELINE_METHODS,
+        TIMELINE_FOOT,
+    )
+
+
+ANOMALY_MAX_BANNERS = 3
+
+
+def anomaly_figure(weekly_df, unit):
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=weekly_df["week_start"], y=weekly_df["value"],
+        mode="lines+markers",
+        name=f"Weekly {unit}",
+        line=dict(color=CHART_COLORS[0], width=2.2),
+        marker=dict(size=5),
+        fill="tozeroy", fillcolor="rgba(117,131,255,0.10)",
+        hovertemplate="<b>%{y:,}</b> " + unit + "<extra></extra>",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=weekly_df["week_start"], y=weekly_df["baseline_mean"],
+        mode="lines",
+        name=f"Average of previous {ANOMALY_BASELINE_WEEKS} weeks",
+        line=dict(color=CHART_COLORS[7], width=1.6, dash="dash"),
+        connectgaps=False,
+        hovertemplate="%{y:.1f} recent average<extra></extra>",
+    ))
+
+    marks = {
+        "spike": ("Spike", THEME["warning"], "diamond"),
+        "drop": ("Drop", THEME["danger"], "triangle-down"),
+        "inactive": ("Inactive week", THEME["danger"], "x"),
+    }
+
+    for flag, (label, color, symbol) in marks.items():
+
+        flagged = weekly_df[weekly_df["flag"] == flag]
+
+        if flagged.empty:
+            continue
+
+        fig.add_trace(go.Scatter(
+            x=flagged["week_start"], y=flagged["value"],
+            mode="markers",
+            name=label,
+            marker=dict(
+                symbol=symbol,
+                size=13,
+                color=color,
+                line=dict(color=THEME["surface"], width=1.5),
+            ),
+            hovertemplate=f"<b>{label}</b><extra></extra>",
+        ))
+
+    fig.update_xaxes(title_text="Week starting")
+    fig.update_yaxes(title_text=unit.capitalize(), rangemode="tozero")
+
+    return _style_figure(fig, height=360, legend=True)
+
+
+def render_anomaly_detection(analysis):
+
+    result = analysis.get("anomaly_detection") or {}
+    series = result.get("series") or []
+
+    if not series:
+        return
+
+    section_header(
+        "Anomaly Detection",
+        "Weeks where commit, issue, pull request or contributor activity was unusual compared with the repository's recent history.",
+        "alert",
+    )
+
+    anomalies = result["anomalies"]
+    recent = result["recent"]
+    evaluated = result["evaluated"]
+    recent_weeks = result["recent_weeks"]
+    weeks_evaluated = max((item["evaluated_weeks"] for item in series), default=0)
+
+    if recent:
+        status_value, status_tone = "Unusual activity", "warning"
+        status_hint = f"{len(recent)} in the last {recent_weeks} weeks"
+    elif evaluated:
+        status_value, status_tone = "Normal", "success"
+        status_hint = f"Last {recent_weeks} weeks look typical"
+    else:
+        status_value, status_tone = "Not enough data", ""
+        status_hint = f"Needs more than {ANOMALY_MIN_BASELINE_WEEKS} complete weeks"
+
+    if anomalies:
+        latest = anomalies[0]
+        latest_value = fmt_date(latest["week_start"])
+        latest_hint = f"{latest['label']} · {latest['name']}"
+    else:
+        latest_value, latest_hint = "None", "No anomalies found"
+
+    kpi_grid([
+        {"label": "Status", "value": status_value, "icon": "alert" if recent else "check", "tone": status_tone, "hint": status_hint},
+        {"label": "Anomalies Found", "value": fmt_int(len(anomalies)), "icon": "trending", "tone": "blue", "hint": f"Across {fmt_int(weeks_evaluated)} weeks evaluated"},
+        {"label": "Latest Anomaly", "value": latest_value, "icon": "calendar", "tone": "violet", "hint": latest_hint},
+        {"label": "Baseline", "value": f"{ANOMALY_BASELINE_WEEKS} weeks", "icon": "clock", "tone": "blue", "hint": "Previous weeks used for comparison"},
+    ])
+
+    if recent:
+
+        for item in recent[:ANOMALY_MAX_BANNERS]:
+            notice("warning", "Unusual activity detected", item["sentence"])
+
+        extra = len(recent) - ANOMALY_MAX_BANNERS
+
+        if extra > 0:
+            render_html(
+                f'<div class="gs-period-note" style="margin-bottom:.6rem;">'
+                f'<span>+{fmt_int(extra)} more recent anomalies are listed below.</span></div>'
+            )
+
+    elif evaluated:
+        notice(
+            "success",
+            "No unusual activity",
+            f"The last {recent_weeks} complete weeks are within the normal range of the weeks before them.",
+        )
+
+    else:
+        notice(
+            "info",
+            "Not enough history",
+            f"Anomaly detection needs more than {ANOMALY_MIN_BASELINE_WEEKS} complete weeks of data. Try a longer analysis window.",
+        )
+
+    weekly = result["weekly"]
+    options = [item["key"] for item in series if item["key"] in weekly]
+
+    if options:
+
+        names = {item["key"]: item for item in series}
+
+        if len(options) > 1:
+            chosen = st.radio(
+                "Activity series",
+                options,
+                format_func=lambda key: names[key]["name"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key=f"anomaly_series_{'_'.join(options)}",
+            )
+        else:
+            chosen = options[0]
+
+        spec = names[chosen]
+        weekly_df = weekly[chosen]
+        weekly_table = weekly_df.sort_values("week_start", ascending=False).copy()
+        weekly_table["flag"] = weekly_table["flag"].map(
+            lambda flag: ANOMALY_LABELS.get(flag, "")
+        )
+
+        visual_card(
+            "anomaly_weekly",
+            f"Weekly {spec['unit']}",
+            "Each point is one complete week. Marked weeks were flagged against the dashed recent average.",
+            fig=anomaly_figure(weekly_df, spec["unit"]),
+            df=weekly_table,
+            column_config={
+                "week_start": st.column_config.DatetimeColumn("Week starting", format="D MMM YYYY"),
+                "value": st.column_config.NumberColumn(spec["unit"].capitalize(), format="%d"),
+                "baseline_mean": st.column_config.NumberColumn("Recent average", format="%.1f"),
+                "flag": st.column_config.TextColumn("Flag"),
+            },
+            height=360,
+        )
+
+    if anomalies:
+
+        with card_open(
+            "anomaly_history",
+            "Flagged weeks",
+            "Every anomaly found in the analysis window, newest first.",
+        ):
+            styled_dataframe(
+                result["table"],
+                column_config={
+                    "week_start": st.column_config.DatetimeColumn("Week starting", format="D MMM YYYY"),
+                    "series": st.column_config.TextColumn("Series"),
+                    "type": st.column_config.TextColumn("Type"),
+                    "weeks": st.column_config.NumberColumn("Weeks", format="%d"),
+                    "observed": st.column_config.NumberColumn("Observed", format="%d"),
+                    "recent_average": st.column_config.NumberColumn("Recent average", format="%.1f"),
+                    "ratio": st.column_config.NumberColumn("Times average", format="%.1fx"),
+                    "description": st.column_config.TextColumn("What happened", width="large"),
+                },
+                height=min(420, 38 * len(result["table"]) + 40),
+            )
+
+    render_methodology(
+        "anomaly_method",
+        "How anomalies are detected",
+        "Each flag above follows these rules.",
+        ANOMALY_METHODS,
+        ANOMALY_FOOT,
+    )
 
 
 def render_results():
@@ -2436,44 +5911,83 @@ def render_results():
             f'</div>'
         )
 
+        render_data_status(analysis, owner, repo, selected)
+
         render_repository_overview(analysis["repository"], owner, repo)
+
+        render_repository_snapshot(analysis, selected)
+
+        if selected:
+            render_health_score(analysis)
+
+        if selected & {"Commits", "Issues", "Pull Requests"}:
+            render_trend_detection(analysis)
+
+        if selected & {"Commits", "Issues", "Pull Requests", "Releases"}:
+            render_repository_timeline(analysis)
+
+        if selected & {"Commits", "Issues", "Pull Requests"}:
+            render_anomaly_detection(analysis)
 
         if "Commits" in selected:
             render_commits_section(analysis)
+            render_commit_heatmap(analysis)
+            render_commit_velocity(analysis)
 
         if "Contributors" in selected:
             render_contributors_section(analysis)
 
         if "Issues" in selected:
             render_issues_section(analysis)
+            render_issue_resolution(analysis)
 
         if "Pull Requests" in selected:
             render_pull_requests_section(analysis)
+            render_pull_request_health(analysis)
 
         if "Languages" in selected:
             render_languages_section(analysis)
 
         if "Releases" in selected:
             render_releases_section(analysis, owner, repo)
+            render_release_cadence(analysis)
+
+        render_api_usage(analysis)
 
 
 def main():
 
-    inject_styles()
     init_state()
+    apply_theme(st.session_state.theme)
+    inject_styles()
     hero()
 
     analyze_clicked = render_control_panel()
 
+    compare_clicked = render_compare_panel()
+
+    render_live_rate_limit()
+
+    refresh_wanted = st.session_state.refresh_requested
+    st.session_state.refresh_requested = False
+
     if analyze_clicked:
         run_analysis()
 
+    elif compare_clicked:
+        run_comparison()
+
+    elif refresh_wanted and st.session_state.analysis is not None:
+        refresh_analysis()
+
     st.write("")
+
+    render_comparison_area()
 
     if st.session_state.error:
 
-        kind, message = st.session_state.error
-        render_error(kind, message)
+        kind, message, extra = st.session_state.error
+        render_error(kind, message, extra)
 
     elif st.session_state.analysis is not None:
 
@@ -2487,6 +6001,8 @@ def main():
             "and select Analyze repository to pull live data from the GitHub API.",
             "search",
         )
+
+    render_sidebar()
 
 
 if __name__ == "__main__":
